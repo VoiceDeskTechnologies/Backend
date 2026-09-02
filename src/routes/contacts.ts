@@ -1,0 +1,10 @@
+import { Router } from "express";
+import { z } from "zod";
+import type { AuthenticatedRequest } from "../middleware/auth.js";
+import { getSupabaseAdmin } from "../services/supabase.js";
+
+const contactInput = z.object({ firstName: z.string().trim().min(1).max(80), lastName: z.string().trim().max(80).default(""), company: z.string().trim().max(120).nullable().default(null), phoneNumber: z.string().trim().min(7).max(30), email: z.string().email().nullable().default(null), notes: z.string().trim().max(2000).nullable().default(null), tags: z.array(z.string().trim().max(30)).max(20).default([]), favorite: z.boolean().default(false) });
+export const contactsRouter = Router();
+contactsRouter.get("/", async (request: AuthenticatedRequest, response, next) => { try { const { data, error } = await getSupabaseAdmin().from("contacts").select("*").eq("user_id", request.userId).order("favorite", { ascending: false }).order("last_name"); if (error) throw error; response.json(data); } catch (error) { next(error); } });
+contactsRouter.post("/", async (request: AuthenticatedRequest, response, next) => { const parsed = contactInput.safeParse(request.body); if (!parsed.success) return response.status(400).json({ error: "Invalid contact details", fields: parsed.error.flatten().fieldErrors }); try { const input = parsed.data; const { data, error } = await getSupabaseAdmin().from("contacts").insert({ user_id: request.userId, first_name: input.firstName, last_name: input.lastName, company: input.company, phone_number: input.phoneNumber, email: input.email, notes: input.notes, tags: input.tags, favorite: input.favorite }).select().single(); if (error) throw error; response.status(201).json(data); } catch (error) { next(error); } });
+contactsRouter.delete("/:id", async (request: AuthenticatedRequest, response, next) => { try { const { error } = await getSupabaseAdmin().from("contacts").delete().eq("id", request.params.id).eq("user_id", request.userId); if (error) throw error; response.status(204).send(); } catch (error) { next(error); } });

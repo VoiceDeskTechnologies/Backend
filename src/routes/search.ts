@@ -1,0 +1,6 @@
+import { Router } from "express";
+import type { AuthenticatedRequest } from "../middleware/auth.js";
+import { getSupabaseAdmin } from "../services/supabase.js";
+
+export const searchRouter = Router();
+searchRouter.get("/", async (request: AuthenticatedRequest, response, next) => { const query = String(request.query.q ?? "").trim(); if (query.length < 2) return response.json({ contacts: [], calls: [], agents: [] }); try { const database = getSupabaseAdmin(); const [contacts, calls, agents] = await Promise.all([database.from("contacts").select("id,first_name,last_name,company,phone_number").eq("user_id", request.userId).or(`first_name.ilike.%${query}%,last_name.ilike.%${query}%,company.ilike.%${query}%,phone_number.ilike.%${query}%`).limit(20), database.from("calls").select("id,to_number,direction,status,summary,created_at").eq("user_id", request.userId).or(`to_number.ilike.%${query}%,summary.ilike.%${query}%`).limit(20), database.from("ai_agents").select("id,name,role,status").eq("user_id", request.userId).or(`name.ilike.%${query}%,role.ilike.%${query}%`).limit(20)]); if (contacts.error || calls.error || agents.error) throw contacts.error ?? calls.error ?? agents.error; response.json({ contacts: contacts.data, calls: calls.data, agents: agents.data }); } catch (error) { next(error); } });

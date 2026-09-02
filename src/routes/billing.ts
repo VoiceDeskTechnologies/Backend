@@ -1,0 +1,17 @@
+import { Router } from "express";
+import { z } from "zod";
+import type { AuthenticatedRequest } from "../middleware/auth.js";
+import { getSupabaseAdmin } from "../services/supabase.js";
+import { calculatePaygPrice } from "../services/billing.js";
+import { requireAuth } from "../middleware/auth.js";
+import { getEntitlement } from "../services/billing/EntitlementService.js";
+import { getOrCreateTrial } from "../services/billing/TrialService.js";
+
+export const billingRouter = Router();
+billingRouter.get("/plans", async (_request, response, next) => { try { const { data, error } = await getSupabaseAdmin().from("plans").select("*").eq("active", true).order("monthly_price"); if (error) throw error; response.json(data); } catch (error) { next(error); } });
+billingRouter.get("/payg", async (_request, response, next) => { try { const { data, error } = await getSupabaseAdmin().from("payg_packages").select("*").eq("active", true).order("minutes"); if (error) throw error; response.json(data); } catch (error) { next(error); } });
+billingRouter.post("/payg/calculate", async (request, response, next) => { const parsed = z.object({ minutes: z.coerce.number().int() }).safeParse(request.body); if (!parsed.success) return response.status(400).json({ error: "Minutes must be a whole number" }); try { response.json(await calculatePaygPrice(parsed.data.minutes)); } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : "Unable to calculate price" }); } });
+billingRouter.get("/usage", requireAuth, async (request: AuthenticatedRequest, response, next) => { try { const database = getSupabaseAdmin(); const [entitlement, calls] = await Promise.all([getEntitlement(request.userId!), database.from("calls").select("id,direction,duration_seconds,status").eq("user_id", request.userId)]); if (calls.error) throw calls.error; response.json({ ...entitlement, calls: calls.data ?? [] }); } catch (error) { next(error); } });
+billingRouter.get("/trial", requireAuth, async (request: AuthenticatedRequest, response, next) => { try { response.json(await getOrCreateTrial(request.userId!)); } catch (error) { next(error); } });
+billingRouter.get("/billing", requireAuth, async (request: AuthenticatedRequest, response, next) => { try { const database = getSupabaseAdmin(); const [period, purchases] = await Promise.all([database.from("plan_periods").select("*,plans(name,monthly_price,minutes)").eq("user_id", request.userId).order("period_end", { ascending: false }).limit(1).maybeSingle(), database.from("payg_purchases").select("*,payg_packages(product_id)").eq("user_id", request.userId).order("created_at", { ascending: false })]); if (period.error || purchases.error) throw period.error ?? purchases.error; response.json({ period: period.data, purchases: purchases.data ?? [] }); } catch (error) { next(error); } });
+billingRouter.get("/recommendation", async (request, response, next) => { const minutes = Math.max(0, Number(request.query.minutes ?? 0)); try { const { data, error } = await getSupabaseAdmin().from("plans").select("id,name,monthly_price,minutes").eq("active", true).order("minutes"); if (error) throw error; const plan = (data ?? []).find((candidate) => candidate.minutes >= minutes) ?? data?.at(-1); response.json({ recommendedPlan: plan, additionalMinutes: Math.max(0, minutes - (plan?.minutes ?? 0)) }); } catch (error) { next(error); } });
