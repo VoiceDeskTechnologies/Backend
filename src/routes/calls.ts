@@ -9,7 +9,10 @@ import { isAdministrator } from "../middleware/admin.js";
 
 export const callsRouter = Router();
 const startCallInput = z.object({
-  toNumber: z.string().trim().min(7).max(30),
+  toNumber: z
+    .string()
+    .trim()
+    .regex(/^\+[1-9]\d{6,14}$/, "Destination must be an E.164 phone number"),
   agentId: z.string().uuid().nullable().default(null),
 });
 callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
@@ -18,13 +21,17 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
     return response.status(400).json({ error: "Invalid call details" });
   try {
     const entitlement = await getEntitlement(request.userId!);
-    const administrator = await isAdministrator(request.userId!, request.userEmail);
-    if (!administrator && (entitlement.accountStatus !== "active" || !entitlement.canCall))
-      return response
-        .status(402)
-        .json({
-          error: "Your account does not have available calling minutes",
-        });
+    const administrator = await isAdministrator(
+      request.userId!,
+      request.userEmail,
+    );
+    if (
+      !administrator &&
+      (entitlement.accountStatus !== "active" || !entitlement.canCall)
+    )
+      return response.status(402).json({
+        error: "Your account does not have available calling minutes",
+      });
     const database = getSupabaseAdmin();
     const ownedAgent = parsed.data.agentId
       ? await database
@@ -48,6 +55,8 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
       .insert({
         user_id: request.userId,
         agent_id: parsed.data.agentId,
+        provider: "telnyx",
+        from_number: config.TELNYX_PHONE_NUMBER,
         to_number: parsed.data.toNumber,
         direction: "outbound",
         status: "queued",
@@ -59,7 +68,7 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
       const result = await new TelnyxTelephonyService().startOutboundCall({
         to: parsed.data.toNumber,
         from: config.TELNYX_PHONE_NUMBER,
-        callbackUrl: `${config.PUBLIC_URL}/telnyx/webhook`,
+        callbackUrl: `${config.PUBLIC_URL}/api/webhooks/telnyx`,
       });
       const updated = await database
         .from("calls")
@@ -88,18 +97,19 @@ callsRouter.post(
   async (request: AuthenticatedRequest, response, next) => {
     try {
       const entitlement = await getEntitlement(request.userId!);
-      const administrator = await isAdministrator(request.userId!, request.userEmail);
+      const administrator = await isAdministrator(
+        request.userId!,
+        request.userEmail,
+      );
       if (entitlement.accountStatus !== "active")
         return response
           .status(403)
           .json({ error: "Your account is not active." });
       if (!administrator && !entitlement.canCall)
-        return response
-          .status(402)
-          .json({
-            error:
-              "Your 3-day trial has ended. Choose a HandsFree plan to continue making AI calls.",
-          });
+        return response.status(402).json({
+          error:
+            "Your 3-day trial has ended. Choose a HandsFree plan to continue making AI calls.",
+        });
       response.json({
         allowed: true,
         maxMinutes: entitlement.balances.totalMinutes,

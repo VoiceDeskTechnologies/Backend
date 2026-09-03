@@ -2,8 +2,10 @@ import { Router } from "express";
 import { z } from "zod";
 import type { AdminRequest } from "../middleware/admin.js";
 import { getSupabaseAdmin } from "../services/supabase.js";
+import { config } from "../config.js";
 
 export const adminRouter = Router();
+adminRouter.get("/telephony/config", (_request, response) => response.json({ provider: "telnyx", configured: { apiKey: Boolean(config.TELNYX_API_KEY), connectionId: Boolean(config.TELNYX_CONNECTION_ID), phoneNumber: Boolean(config.TELNYX_PHONE_NUMBER), publicKey: Boolean(config.TELNYX_PUBLIC_KEY), publicUrl: Boolean(config.PUBLIC_URL) } }));
 
 async function audit(request: AdminRequest, action: string, resource: string, resourceId: string | string[] | undefined, metadata: Record<string, unknown> = {}) {
   if (!request.userId) return;

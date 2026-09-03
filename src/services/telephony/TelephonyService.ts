@@ -10,22 +10,66 @@ export interface TelephonyService {
   startOutboundCall(
     request: OutboundCallRequest,
   ): Promise<{ providerCallId: string }>;
+  answerCall(callControlId: string): Promise<void>;
+  speak(callControlId: string, text: string): Promise<void>;
 }
 
 export class TelnyxTelephonyService implements TelephonyService {
+  constructor(
+    private readonly apiKey = config.TELNYX_API_KEY,
+    private readonly connectionId = config.TELNYX_CONNECTION_ID,
+  ) {}
+  private async command(
+    callControlId: string,
+    action: "answer" | "speak",
+    body: Record<string, unknown> = {},
+  ) {
+    if (!this.apiKey) throw new Error("Telnyx is not configured");
+    const response = await fetch(
+      `https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/${action}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!response.ok) {
+      const errorBody = (await response.json().catch(() => null)) as {
+        errors?: Array<{ detail?: string }>;
+      } | null;
+      throw new Error(
+        errorBody?.errors?.[0]?.detail ?? `Telnyx call ${action} failed`,
+      );
+    }
+  }
+
+  async answerCall(callControlId: string) {
+    await this.command(callControlId, "answer");
+  }
+  async speak(callControlId: string, text: string) {
+    await this.command(callControlId, "speak", {
+      payload: text,
+      voice: "female",
+      language: "en-US",
+    });
+  }
+
   async startOutboundCall(
     request: OutboundCallRequest,
   ): Promise<{ providerCallId: string }> {
-    if (!config.TELNYX_API_KEY || !config.TELNYX_CONNECTION_ID)
+    if (!this.apiKey || !this.connectionId)
       throw new Error("Telnyx is not configured");
     const response = await fetch("https://api.telnyx.com/v2/calls", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.TELNYX_API_KEY}`,
+        Authorization: `Bearer ${this.apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        connection_id: config.TELNYX_CONNECTION_ID,
+        connection_id: this.connectionId,
         to: request.to,
         from: request.from,
         webhook_url: request.callbackUrl,

@@ -27,10 +27,12 @@ PSTN caller
 
 ## Current backend entry points
 
-- `POST /telnyx/webhook`: verifies Telnyx Ed25519 signatures and reconciles call-control status.
+- `POST /api/webhooks/telnyx`: verifies Telnyx Ed25519 signatures, deduplicates events, creates inbound call records, answers test calls, and reconciles call-control status. `/telnyx/webhook` remains an alias.
 - `WS /ws`: creates a per-call conversation and handles `setup`, `prompt`, and `interrupt` messages.
 - `TelnyxTelephonyService`: creates outbound calls through Telnyx Call Control and uses the configured HandsFree caller ID.
 - `GeminiService`: server-only Gemini adapter with a short output cap and request cancellation.
+
+The Telnyx foundation tests run with `npm test`. They mock provider HTTP calls and never place a paid call.
 
 ## Recommended production sequence
 
