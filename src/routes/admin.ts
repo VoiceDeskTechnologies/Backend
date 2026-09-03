@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { AdminRequest } from "../middleware/admin.js";
 import { getSupabaseAdmin } from "../services/supabase.js";
 import { config } from "../config.js";
-import { ensureNumberForUser } from "../services/telephony/TelnyxNumberService.js";
+import { ensureNumberForUser, getNumber, listOwnedNumbers } from "../services/telephony/TelnyxNumberService.js";
 
 export const adminRouter = Router();
 adminRouter.get("/telephony/config", (_request, response) =>
@@ -18,6 +18,66 @@ adminRouter.get("/telephony/config", (_request, response) =>
     },
   }),
 );
+
+adminRouter.get("/phone-numbers", async (_request, response, next) => {
+  try {
+    const { data, error } = await getSupabaseAdmin()
+      .from("phone_numbers")
+      .select("*, profiles(display_name)")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    response.json(data ?? []);
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.get("/phone-numbers/inventory", async (_request, response, next) => {
+  try {
+    response.json(await listOwnedNumbers());
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.post("/phone-numbers/import", async (request: AdminRequest, response, next) => {
+  const parsed = z.object({ telnyxPhoneNumberId: z.string().trim().min(1), userId: z.string().uuid() }).safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: "Telnyx number ID and target user are required" });
+  try {
+    const number = await getNumber(parsed.data.telnyxPhoneNumberId);
+    if (!number.id || !number.phone_number) return response.status(404).json({ error: "Telnyx number not found" });
+    if (number.connection_id && number.connection_id !== config.TELNYX_CONNECTION_ID)
+      return response.status(400).json({ error: "That number is not attached to the configured Telnyx connection" });
+    const database = getSupabaseAdmin();
+    const existing = await database.from("phone_numbers").select("id").eq("telnyx_phone_number_id", number.id).maybeSingle();
+    if (existing.error) throw existing.error;
+    if (existing.data) return response.status(409).json({ error: "That Telnyx number is already imported" });
+    const { data, error } = await database.from("phone_numbers").insert({
+      user_id: parsed.data.userId,
+      phone_number: number.phone_number,
+      provider: "telnyx",
+      provider_number_id: number.id,
+      telnyx_phone_number_id: number.id,
+      connection_id: number.connection_id ?? config.TELNYX_CONNECTION_ID,
+      country: number.country_code ?? config.TELNYX_DEFAULT_COUNTRY,
+      country_code: number.country_code ?? config.TELNYX_DEFAULT_COUNTRY,
+      area_code: number.phone_number.match(/^\+1(\d{3})/)?.[1] ?? null,
+      status: "active",
+      provisioning_status: "active",
+      is_default: false,
+      assigned_at: new Date().toISOString(),
+      capabilities: number.features ?? { voice: true },
+    }).select().single();
+    if (error) {
+      if (error.code === "23505") return response.status(409).json({ error: "That Telnyx number is already imported" });
+      throw error;
+    }
+    await audit(request, "phone_number_imported", "phone_number", data.id, { telnyx_number_id: number.id, user_id: parsed.data.userId });
+    response.status(201).json(data);
+  } catch (error) {
+    next(error);
+  }
+});
 
 async function audit(
   request: AdminRequest,

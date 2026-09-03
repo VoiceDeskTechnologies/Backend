@@ -24,6 +24,7 @@ import {
 } from "./services/telephony/TelnyxWebhookService.js";
 import { getSupabaseAdmin } from "./services/supabase.js";
 import { TelnyxTelephonyService } from "./services/telephony/TelephonyService.js";
+import { retryDueProvisioningJobs } from "./services/telephony/TelnyxNumberService.js";
 
 const app = express();
 app.use(helmet());
@@ -224,3 +225,9 @@ attachConversationRelay(server, config.GEMINI_API_KEY);
 server.listen(config.PORT, () =>
   process.stdout.write(`HandsFree backend listening on ${config.PORT}\n`),
 );
+const provisioningRetryTimer = setInterval(() => {
+  void retryDueProvisioningJobs().catch((error: Error) =>
+    console.error(JSON.stringify({ event: "number_provisioning_retry_sweep_failed", errorCode: error.name })),
+  );
+}, 60_000);
+provisioningRetryTimer.unref();
