@@ -18,7 +18,7 @@ const startCallInput = z.object({
 callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
   const parsed = startCallInput.safeParse(request.body);
   if (!parsed.success)
-    return response.status(400).json({ error: "Invalid call details" });
+    return response.status(400).json({ error: "Enter a valid E.164 number, such as +14155550123", fields: parsed.error.flatten().fieldErrors });
   try {
     const entitlement = await getEntitlement(request.userId!);
     const administrator = await isAdministrator(
