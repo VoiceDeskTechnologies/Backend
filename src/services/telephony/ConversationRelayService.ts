@@ -2,7 +2,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { ConfiguredGeminiService } from "../ai/GeminiService.js";
 import { ConversationManager } from "../ai/ConversationManager.js";
 
-type RelayMessage = { type: string; callSid?: string; voicePrompt?: string };
+type RelayMessage = { type: string; callControlId?: string; voicePrompt?: string };
 export function attachConversationRelay(server: import("http").Server, apiKey: string | undefined) {
   const websocketServer = new WebSocketServer({ noServer: true });
   server.on("upgrade", (request, socket, head) => { if (request.url !== "/ws") { socket.destroy(); return; } websocketServer.handleUpgrade(request, socket, head, (websocket) => websocketServer.emit("connection", websocket, request)); });

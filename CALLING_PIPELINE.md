@@ -1,17 +1,17 @@
 # HandsFree calling pipeline
 
-The attached Twilio ConversationRelay example is a good transport pattern. HandsFree uses the same shape, with the following production boundaries:
+HandsFree uses Telnyx Call Control and a per-call WebSocket relay, with the following production boundaries:
 
 ```text
 PSTN caller
-  -> Twilio Voice webhook POST /twiml
-  -> TwiML <Connect><ConversationRelay url="wss://.../ws" /></Connect>
+  -> Telnyx webhook POST /telnyx/webhook
+  -> Telnyx call media/WebSocket connection
   -> one WebSocket per call
   -> ConversationRelay performs speech recognition, turn detection, TTS, and barge-in
   -> ConversationManager owns only this call's history and state
   -> GeminiService sends short, cancellable async requests
   -> text response immediately returns to ConversationRelay as { type: "text", last: true }
-  -> Twilio speaks it to the caller
+  -> Telnyx speaks or streams it to the caller
 ```
 
 ## Low-latency rules
@@ -27,16 +27,16 @@ PSTN caller
 
 ## Current backend entry points
 
-- `POST /twiml`: returns ConversationRelay TwiML and fails clearly when `PUBLIC_URL` is missing.
+- `POST /telnyx/webhook`: verifies Telnyx Ed25519 signatures and reconciles call-control status.
 - `WS /ws`: creates a per-call conversation and handles `setup`, `prompt`, and `interrupt` messages.
-- `TwilioTelephonyService`: creates outbound calls with Twilio and uses the configured HandsFree caller ID.
+- `TelnyxTelephonyService`: creates outbound calls through Telnyx Call Control and uses the configured HandsFree caller ID.
 - `GeminiService`: server-only Gemini adapter with a short output cap and request cancellation.
 
 ## Recommended production sequence
 
 1. Authenticate the user and validate the agent, assigned number, destination, entitlement, and usage reservation in one backend transaction.
-2. Insert the call as `queued`, then call Twilio with the public `/twiml` URL.
-3. Update lifecycle state only from Twilio status callbacks and append immutable `call_events`.
+2. Insert the call as `queued`, then call Telnyx with the public webhook URL.
+3. Update lifecycle state only from verified Telnyx callbacks and append immutable `call_events`.
 4. On relay setup, load the call's agent context by provider call ID. Build the disclosure/greeting from the stored agent and user setting.
 5. On each prompt, run the constrained agent tool policy, retrieve only relevant knowledge, call Gemini, and return text immediately.
 6. On completion, reconcile actual provider duration, append usage ledger entries, generate the summary asynchronously, and notify the user.
