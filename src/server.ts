@@ -214,6 +214,8 @@ app.use(
     if (error instanceof SyntaxError && "body" in error)
       return response.status(400).json({ error: "Malformed JSON payload" });
     console.error(error.message);
+    if (/column .* does not exist|schema cache|relation .* does not exist/i.test(error.message))
+      return response.status(503).json({ error: "The backend database migrations are not fully applied. Apply the latest Supabase migrations and retry." });
     response.status(500).json({ error: "Unexpected server error" });
   },
 );
