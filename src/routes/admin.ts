@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { AdminRequest } from "../middleware/admin.js";
 import { getSupabaseAdmin } from "../services/supabase.js";
 import { config } from "../config.js";
-import { ensureNumberForUser, getNumber, listOwnedNumbers } from "../services/telephony/TelnyxNumberService.js";
+import { claimConfiguredNumberForUser, ensureNumberForUser, getNumber, listOwnedNumbers } from "../services/telephony/TelnyxNumberService.js";
 
 export const adminRouter = Router();
 adminRouter.get("/telephony/config", (_request, response) =>
@@ -35,6 +35,19 @@ adminRouter.get("/phone-numbers", async (_request, response, next) => {
 adminRouter.get("/phone-numbers/inventory", async (_request, response, next) => {
   try {
     response.json(await listOwnedNumbers());
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.post("/phone-numbers/claim-configured", async (request: AdminRequest, response, next) => {
+  const parsed = z.object({ userId: z.string().uuid() }).safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: "A target user is required" });
+  try {
+    const claimed = await claimConfiguredNumberForUser(parsed.data.userId);
+    if (claimed.created)
+      await audit(request, "configured_phone_number_claimed", "user", parsed.data.userId, { phone_number_id: claimed.number?.id });
+    response.status(claimed.created ? 201 : 200).json(claimed);
   } catch (error) {
     next(error);
   }

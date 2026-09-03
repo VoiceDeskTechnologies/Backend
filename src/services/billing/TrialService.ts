@@ -1,4 +1,5 @@
 import { getSupabaseAdmin } from "../supabase.js";
+import { provisionNumberForUser } from "../telephony/TelnyxNumberService.js";
 
 export async function getOrCreateTrial(userId: string) {
   const database = getSupabaseAdmin();
@@ -12,6 +13,15 @@ export async function getOrCreateTrial(userId: string) {
   const expires = new Date(started.getTime() + Number(settings.trial_duration_days) * 86400000);
   const { data, error: insertError } = await database.from("trial_accounts").insert({ user_id: userId, trial_started_at: started.toISOString(), trial_expires_at: expires.toISOString(), trial_minutes_granted: settings.trial_minutes, trial_minutes_remaining: settings.trial_minutes }).select().single();
   if (insertError) throw insertError;
+  void provisionNumberForUser(userId, {
+    idempotencyKey: `trial:${userId}`,
+  }).catch((provisioningError: Error) => {
+    console.error(JSON.stringify({
+      event: "trial_number_provisioning_failed",
+      userId,
+      errorCode: provisioningError.name,
+    }));
+  });
   return data;
 }
 

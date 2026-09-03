@@ -143,6 +143,54 @@ export async function listOwnedNumbers() {
   );
 }
 
+export async function claimConfiguredNumberForUser(userId: string) {
+  if (!config.TELNYX_PHONE_NUMBER)
+    throw new TelnyxNumberError(
+      "TELNYX_PHONE_NUMBER is not configured",
+      "TELNYX_CONFIGURATION_ERROR",
+    );
+  const database = getSupabaseAdmin();
+  const existing = await activeNumberForUser(userId);
+  if (existing) return { number: existing, created: false, status: existing.provisioning_status };
+  const ownedNumbers = await listOwnedNumbers();
+  const owned = ownedNumbers.find((number) => number.phone_number === config.TELNYX_PHONE_NUMBER);
+  if (!owned?.id || !owned.phone_number)
+    throw new TelnyxNumberError(
+      "The configured Telnyx number was not found in the account inventory",
+      "TELNYX_NUMBER_NOT_FOUND",
+    );
+  const verified = await getNumber(owned.id);
+  if (!verified.phone_number || verified.phone_number !== config.TELNYX_PHONE_NUMBER)
+    throw new TelnyxNumberError("Configured Telnyx number verification failed", "TELNYX_CONFIGURATION_ERROR");
+  if (verified.connection_id && verified.connection_id !== config.TELNYX_CONNECTION_ID)
+    throw new TelnyxNumberError("Configured number is attached to another Telnyx connection", "TELNYX_CONFIGURATION_ERROR");
+  const duplicate = await database.from("phone_numbers").select("id,user_id").eq("telnyx_phone_number_id", verified.id).maybeSingle();
+  if (duplicate.error) throw duplicate.error;
+  if (duplicate.data && duplicate.data.user_id !== userId)
+    throw new Error("The configured Telnyx number is already assigned to another user");
+  if (duplicate.data) return { number: await activeNumberForUser(userId), created: false, status: "active" };
+  const defaultNumber = await database.from("phone_numbers").select("id").eq("user_id", userId).eq("is_default", true).eq("provisioning_status", "active").limit(1).maybeSingle();
+  if (defaultNumber.error) throw defaultNumber.error;
+  const { data, error } = await database.from("phone_numbers").insert({
+    user_id: userId,
+    phone_number: verified.phone_number,
+    provider: "telnyx",
+    provider_number_id: verified.id,
+    telnyx_phone_number_id: verified.id,
+    connection_id: verified.connection_id ?? config.TELNYX_CONNECTION_ID,
+    country: verified.country_code ?? config.TELNYX_DEFAULT_COUNTRY,
+    country_code: verified.country_code ?? config.TELNYX_DEFAULT_COUNTRY,
+    area_code: verified.phone_number.match(/^\+1(\d{3})/)?.[1] ?? null,
+    status: "active",
+    provisioning_status: "active",
+    is_default: !defaultNumber.data,
+    assigned_at: new Date().toISOString(),
+    capabilities: verified.features ?? { voice: true },
+  }).select().single();
+  if (error) throw error;
+  return { number: data, created: true, status: "active" };
+}
+
 export async function releaseNumber(telnyxPhoneNumberId: string) {
   return telnyxRequest<TelnyxNumber>(
     `/phone_numbers/${encodeURIComponent(telnyxPhoneNumberId)}`,
@@ -176,10 +224,20 @@ export async function provisionNumberForUser(
   if (profileError) throw profileError;
   if (!profile) throw new Error("User not found");
 
+  const { data: administrator, error: administratorError } = await database
+    .from("admin_users")
+    .select("user_id")
+    .eq("user_id", userId)
+    .eq("active", true)
+    .maybeSingle();
+  if (administratorError) throw administratorError;
+  if (administrator && config.TELNYX_PHONE_NUMBER)
+    return claimConfiguredNumberForUser(userId);
+
   const entitlement = await getEntitlement(userId);
-  if (!entitlement.plan)
-    throw new Error("A paid plan is required before provisioning a number");
-  if (options.areaCode && !entitlement.plan.plans.area_code_selection)
+  if (!entitlement.plan && entitlement.trial?.trial_status !== "active")
+    throw new Error("An active trial or paid plan is required before provisioning a number");
+  if (options.areaCode && !entitlement.plan?.plans.area_code_selection)
     throw new Error("Your plan does not support area-code selection");
   if (options.areaCode && !/^\d{3}$/.test(options.areaCode))
     throw new Error("Area code must contain three digits");
