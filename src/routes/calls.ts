@@ -5,6 +5,7 @@ import { getEntitlement } from "../services/billing/EntitlementService.js";
 import { TelnyxTelephonyService } from "../services/telephony/TelephonyService.js";
 import { config } from "../config.js";
 import { z } from "zod";
+import { isAdministrator } from "../middleware/admin.js";
 
 export const callsRouter = Router();
 const startCallInput = z.object({
@@ -17,7 +18,8 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
     return response.status(400).json({ error: "Invalid call details" });
   try {
     const entitlement = await getEntitlement(request.userId!);
-    if (entitlement.accountStatus !== "active" || !entitlement.canCall)
+    const administrator = await isAdministrator(request.userId!, request.userEmail);
+    if (!administrator && (entitlement.accountStatus !== "active" || !entitlement.canCall))
       return response
         .status(402)
         .json({
@@ -86,11 +88,12 @@ callsRouter.post(
   async (request: AuthenticatedRequest, response, next) => {
     try {
       const entitlement = await getEntitlement(request.userId!);
+      const administrator = await isAdministrator(request.userId!, request.userEmail);
       if (entitlement.accountStatus !== "active")
         return response
           .status(403)
           .json({ error: "Your account is not active." });
-      if (!entitlement.canCall)
+      if (!administrator && !entitlement.canCall)
         return response
           .status(402)
           .json({

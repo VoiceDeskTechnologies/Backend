@@ -5,6 +5,13 @@ import { config } from "../config.js";
 
 export type AdminRequest = AuthenticatedRequest & { adminRole?: string };
 
+export async function isAdministrator(userId: string, userEmail?: string) {
+  if (userEmail && config.ADMIN_EMAILS.includes(userEmail)) return true;
+  const { data, error } = await getSupabaseAdmin().from("admin_users").select("user_id").eq("user_id", userId).eq("active", true).maybeSingle();
+  if (error) throw error;
+  return Boolean(data);
+}
+
 export async function requireAdmin(request: AdminRequest, response: Response, next: NextFunction) {
   if (!request.userId) return response.status(401).json({ error: "Authentication required" });
   if (request.userEmail && config.ADMIN_EMAILS.includes(request.userEmail)) {

@@ -52,6 +52,36 @@ adminRouter.get("/users", async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+  adminRouter.get("/users/:id", async (request, response, next) => {
+    try {
+      const database = getSupabaseAdmin();
+      const [profile, period, balance, calls, agents, numbers, admin] = await Promise.all([
+        database.from("profiles").select("*").eq("id", request.params.id).maybeSingle(),
+        database.from("plan_periods").select("*,plans(*)").eq("user_id", request.params.id).order("period_end", { ascending: false }).limit(1).maybeSingle(),
+        database.from("usage_balances").select("*").eq("user_id", request.params.id).maybeSingle(),
+        database.from("calls").select("id,status,duration_seconds,created_at", { count: "exact" }).eq("user_id", request.params.id),
+        database.from("ai_agents").select("id", { count: "exact", head: true }).eq("user_id", request.params.id),
+        database.from("phone_numbers").select("id", { count: "exact", head: true }).eq("user_id", request.params.id),
+        database.from("admin_users").select("role,active").eq("user_id", request.params.id).maybeSingle(),
+      ]);
+      const failure = [profile, period, balance, calls, agents, numbers, admin].find((result) => result.error)?.error;
+      if (failure) throw failure;
+      if (!profile.data) return response.status(404).json({ error: "User not found" });
+      const durations = (calls.data ?? []).map((call) => Number(call.duration_seconds ?? 0));
+      response.json({ profile: profile.data, plan: period.data, balance: balance.data, calls: { total: calls.count ?? 0, completed: (calls.data ?? []).filter((call) => call.status === "completed").length, failed: (calls.data ?? []).filter((call) => call.status === "failed").length, averageDurationSeconds: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : 0 }, agents: agents.count ?? 0, numbers: numbers.count ?? 0, admin: admin.data });
+    } catch (error) { next(error); }
+  });
+
+  adminRouter.get("/plans", async (_request, response, next) => { 
+    try { 
+      const { data, error } = await getSupabaseAdmin().from("plans").select("id,name,monthly_price,minutes,active").order("monthly_price"); 
+      if (error) throw error; 
+      response.json(data ?? []); 
+    } catch (error) { 
+      next(error); 
+    } 
+  });
+
 adminRouter.get("/support/unread-count", async (request: AdminRequest, response, next) => {
   try {
     const database = getSupabaseAdmin();
@@ -159,10 +189,15 @@ adminRouter.patch("/users/:id/plan", async (request: AdminRequest, response, nex
     const database = getSupabaseAdmin();
     const [{ data: plan, error: planError }, { data: period, error: periodError }] = await Promise.all([database.from("plans").select("id,name,minutes").eq("id", parsed.data.planId).single(), database.from("plan_periods").select("id,plan_id,plans(name)").eq("user_id", request.params.id).eq("status", "active").maybeSingle()]);
     if (planError || periodError) throw planError ?? periodError;
-    if (!plan || !period) return response.status(404).json({ error: "Active plan entitlement not found" });
-    const { error } = await database.from("plan_periods").update({ plan_id: plan.id, included_minutes: plan.minutes, updated_at: new Date().toISOString() }).eq("id", period.id);
+    if (!plan) return response.status(404).json({ error: "Plan not found" });
+    const now = new Date();
+    const { error } = period
+      ? await database.from("plan_periods").update({ plan_id: plan.id, included_minutes: plan.minutes, updated_at: now.toISOString() }).eq("id", period.id)
+      : await database.from("plan_periods").insert({ user_id: request.params.id, plan_id: plan.id, period_start: now.toISOString(), period_end: new Date(now.getTime() + 30 * 86400000).toISOString(), included_minutes: plan.minutes, status: "active" });
     if (error) throw error;
-    await audit(request, "user_plan_changed", "user", request.params.id, { old_plan: period.plans, new_plan: plan.name, reason: parsed.data.reason });
+    const { error: balanceError } = await database.from("usage_balances").upsert({ user_id: request.params.id, monthly_remaining: plan.minutes, updated_at: now.toISOString() }, { onConflict: "user_id" });
+    if (balanceError) throw balanceError;
+    await audit(request, "user_plan_changed", "user", request.params.id, { old_plan: period?.plans ?? null, new_plan: plan.name, reason: parsed.data.reason });
     response.json({ ok: true, plan });
   } catch (error) { next(error); }
 });
