@@ -14,6 +14,17 @@ export interface TelephonyService {
   speak(callControlId: string, text: string): Promise<void>;
 }
 
+export class TelnyxTelephonyError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly providerStatus?: number,
+  ) {
+    super(message);
+    this.name = "TelnyxTelephonyError";
+  }
+}
+
 export class TelnyxTelephonyService implements TelephonyService {
   constructor(
     private readonly apiKey = config.TELNYX_API_KEY,
@@ -79,12 +90,19 @@ export class TelnyxTelephonyService implements TelephonyService {
     });
     const body = (await response.json()) as {
       data?: { call_control_id?: string };
-      errors?: Array<{ detail?: string }>;
+      errors?: Array<{ code?: string; title?: string; detail?: string }>;
     };
-    if (!response.ok || !body.data?.call_control_id)
-      throw new Error(
-        body.errors?.[0]?.detail ?? "Telnyx could not start the call",
+    if (!response.ok || !body.data?.call_control_id) {
+      const detail = body.errors?.[0]?.detail ?? "Telnyx could not start the call";
+      const restrictedDestination = /non-verified numbers|account level|D60|destination/i.test(detail);
+      throw new TelnyxTelephonyError(
+        restrictedDestination
+          ? "This Telnyx account cannot call this destination until the account is upgraded or the destination is verified."
+          : detail,
+        restrictedDestination ? "TELNYX_DESTINATION_NOT_ALLOWED" : "TELNYX_CALL_FAILED",
+        response.status,
       );
+    }
     return { providerCallId: body.data.call_control_id };
   }
 }

@@ -2,7 +2,7 @@ import { Router } from "express";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { getSupabaseAdmin } from "../services/supabase.js";
 import { getEntitlement } from "../services/billing/EntitlementService.js";
-import { TelnyxTelephonyService } from "../services/telephony/TelephonyService.js";
+import { TelnyxTelephonyService, TelnyxTelephonyError } from "../services/telephony/TelephonyService.js";
 import { config } from "../config.js";
 import { z } from "zod";
 import { isAdministrator } from "../middleware/admin.js";
@@ -116,6 +116,11 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
         errorCode: error instanceof Error ? error.name : "UNKNOWN_ERROR",
         errorMessage: error instanceof Error ? error.message : "Unknown error",
       }));
+      if (error instanceof TelnyxTelephonyError && error.code === "TELNYX_DESTINATION_NOT_ALLOWED")
+        return response.status(403).json({
+          error: error.message,
+          code: error.code,
+        });
       throw error;
     }
   } catch (error) {
