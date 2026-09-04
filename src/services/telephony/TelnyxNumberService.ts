@@ -139,7 +139,7 @@ export async function configureNumber(telnyxPhoneNumberId: string) {
 
 export async function listOwnedNumbers() {
   return telnyxRequest<TelnyxNumber[]>(
-    `/phone_numbers?filter[voice.connection_id]=${encodeURIComponent(config.TELNYX_CONNECTION_ID ?? "")}&page[size]=100`,
+    "/phone_numbers?page[size]=100",
   );
 }
 
@@ -153,14 +153,15 @@ export async function claimConfiguredNumberForUser(userId: string) {
   const existing = await activeNumberForUser(userId);
   if (existing) return { number: existing, created: false, status: existing.provisioning_status };
   const ownedNumbers = await listOwnedNumbers();
-  const owned = ownedNumbers.find((number) => number.phone_number === config.TELNYX_PHONE_NUMBER);
+  const configuredPhoneNumber = config.TELNYX_PHONE_NUMBER.trim();
+  const owned = ownedNumbers.find((number) => number.phone_number === configuredPhoneNumber);
   if (!owned?.id || !owned.phone_number)
     throw new TelnyxNumberError(
       "The configured Telnyx number was not found in the account inventory",
       "TELNYX_NUMBER_NOT_FOUND",
     );
   const verified = await getNumber(owned.id);
-  if (!verified.phone_number || verified.phone_number !== config.TELNYX_PHONE_NUMBER)
+  if (!verified.phone_number || verified.phone_number !== configuredPhoneNumber)
     throw new TelnyxNumberError("Configured Telnyx number verification failed", "TELNYX_CONFIGURATION_ERROR");
   if (verified.connection_id && verified.connection_id !== config.TELNYX_CONNECTION_ID)
     throw new TelnyxNumberError("Configured number is attached to another Telnyx connection", "TELNYX_CONFIGURATION_ERROR");
