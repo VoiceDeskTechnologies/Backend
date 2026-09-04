@@ -25,6 +25,7 @@ import {
 import { getSupabaseAdmin } from "./services/supabase.js";
 import { TelnyxTelephonyService } from "./services/telephony/TelephonyService.js";
 import { retryDueProvisioningJobs } from "./services/telephony/TelnyxNumberService.js";
+import { voiceRouter } from "./routes/voice.js";
 
 const app = express();
 app.use(helmet());
@@ -200,6 +201,7 @@ app.use("/api/settings", requireAuth, settingsRouter);
 app.use("/api/numbers", requireAuth, numbersRouter);
 app.use("/api/knowledge", requireAuth, knowledgeRouter);
 app.use("/api/support", requireAuth, supportRouter);
+app.use("/api/voice", requireAuth, voiceRouter);
 app.use("/api/admin", requireAuth, requireAdmin, adminRouter);
 app.use("/api", billingRouter);
 app.use("/api", requireAuth, (_request, response) =>

@@ -26,5 +26,7 @@ const schema = z.object({
   TELNYX_PUBLIC_KEY: z.string().min(1).optional(),
   TELNYX_DEFAULT_COUNTRY: z.string().length(2).default("US"),
   VOICE_PROVIDER_API_KEY: z.string().min(1).optional(),
+  VOICE_PROVIDER_VOICE_ID: z.string().min(1).optional(),
+  VOICE_PROVIDER_MODEL_ID: z.string().min(1).default("eleven_multilingual_v2"),
 });
 export const config = schema.parse(process.env);
