@@ -1,0 +1,8 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { apiRequest } from "@/lib/api/client";
+
+type Call = { id: string; to_number: string; direction: string; status: string; duration_seconds: number | null; summary: string | null; created_at: string; ai_agents: { name: string } | null };
+export default function CallsPage() { const [calls, setCalls] = useState<Call[]>([]); const [error, setError] = useState(""); useEffect(() => { apiRequest<Call[]>("/api/calls").then(setCalls).catch((reason: Error) => setError(reason.message)); }, []); return <main className="phone-shell feature-page"><header className="app-header"><Link href="/" className="brand"><span className="brand-name">Hands<span>Free</span></span><span className="brand-parent">by VoiceDesk Technologies</span></Link><Link className="feature-back" href="/">Back to phone</Link></header><section className="feature-content"><span className="eyebrow">YOUR HISTORY</span><h1>Calls</h1>{error && <p className="auth-error">{error}</p>}{!error && calls.length === 0 && <div className="empty-state"><h2>No calls yet.</h2><p>Your completed calls will appear here with their real status and summary.</p><Link href="/" className="primary-action">Make an AI call <span>→</span></Link></div>}<div className="contact-list">{calls.map((call) => <article className="contact-row" key={call.id}><span className="agent-avatar">{call.direction === "inbound" ? "↓" : "↑"}</span><div><h2>{call.to_number}</h2><p>{call.ai_agents?.name || "Unassigned agent"} · {call.status}</p><small>{call.summary || "No summary available"}</small></div><time className="call-time">{new Date(call.created_at).toLocaleDateString()}</time></article>)}</div></section></main>; }
