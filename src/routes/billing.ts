@@ -19,7 +19,7 @@ billingRouter.get("/billing", requireAuth, async (request: AuthenticatedRequest,
 billingRouter.get("/recommendation", async (request, response, next) => { const minutes = Math.max(0, Number(request.query.minutes ?? 0)); try { const { data, error } = await getSupabaseAdmin().from("plans").select("id,name,monthly_price,minutes").eq("active", true).order("minutes"); if (error) throw error; const plan = (data ?? []).find((candidate) => candidate.minutes >= minutes) ?? data?.at(-1); response.json({ recommendedPlan: plan, additionalMinutes: Math.max(0, minutes - (plan?.minutes ?? 0)) }); } catch (error) { next(error); } });
 
 billingRouter.post("/billing/paypal/orders", requireAuth, async (request: AuthenticatedRequest, response, next) => {
-	const parsed = z.object({ planId: z.string().uuid(), areaCode: z.string().regex(/^\d{3}$/).optional() }).safeParse(request.body);
+	const parsed = z.object({ planId: z.string().uuid(), areaCode: z.string().regex(/^\d{3}$/).optional(), coupon: z.string().optional(), address: z.object({ name: z.string().max(120), line1: z.string().max(200), city: z.string().max(100), state: z.string().max(100), postalCode: z.string().max(30), country: z.string().length(2) }).optional() }).safeParse(request.body);
 	if (!parsed.success) return response.status(400).json({ error: "A valid plan is required" });
 	try {
 		const database = getSupabaseAdmin();
@@ -27,18 +27,20 @@ billingRouter.post("/billing/paypal/orders", requireAuth, async (request: Authen
 		if (planError) throw planError;
 		if (!plan || Number(plan.monthly_price) <= 0) return response.status(400).json({ error: "That plan is not available for purchase" });
 		if (parsed.data.areaCode && !plan.area_code_selection) return response.status(400).json({ error: "That plan does not support area-code selection" });
-		const paypal = await createPayPalOrder(Number(plan.monthly_price), plan.currency ?? "USD", request.userId!, plan.id);
+		const discount = parsed.data.coupon === "HANDSFREE10" ? Number(plan.monthly_price) * 0.1 : 0;
+		const amount = Number((Number(plan.monthly_price) - discount).toFixed(2));
+		const paypal = await createPayPalOrder(amount, plan.currency ?? "USD", request.userId!, plan.id);
 		if (!paypal.id) throw new Error("PayPal did not return an order ID");
 		const { data: payment, error } = await database.from("payments").insert({
 			user_id: request.userId,
 			paypal_order_id: paypal.id,
 			product_type: "plan",
 			product_id: plan.id,
-			amount: plan.monthly_price,
+			amount,
 			currency: plan.currency ?? "USD",
 			status: "pending",
 			verification_status: "unverified",
-			metadata: { areaCode: parsed.data.areaCode ?? null },
+			metadata: { areaCode: parsed.data.areaCode ?? null, coupon: parsed.data.coupon ?? null, address: parsed.data.address ?? null },
 		}).select().single();
 		if (error) throw error;
 		response.status(201).json({ orderId: paypal.id, paymentId: payment.id, plan, approvalUrl: paypal.links?.find((link) => link.rel === "approve")?.href ?? null });
