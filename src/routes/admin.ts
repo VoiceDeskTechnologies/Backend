@@ -305,6 +305,58 @@ adminRouter.get("/plans", async (_request, response, next) => {
   }
 });
 
+adminRouter.get("/overview/:section", async (request, response, next) => {
+  try {
+    const database = getSupabaseAdmin();
+    const section = request.params.section;
+    if (section === "calls") {
+      const { data, error } = await database.from("calls").select("id,user_id,agent_id,task_id,direction,from_number,to_number,status,duration_seconds,provider,provider_call_id,created_at,ended_at,summary,objective").order("created_at", { ascending: false }).limit(100);
+      if (error) throw error;
+      return response.json({ section, columns: ["status", "direction", "to_number", "duration_seconds", "provider", "created_at"], rows: data ?? [] });
+    }
+    if (section === "agents") {
+      const { data, error } = await database.from("ai_agents").select("id,user_id,name,role,status,language,enabled,created_at,updated_at").order("updated_at", { ascending: false }).limit(100);
+      if (error) throw error;
+      return response.json({ section, columns: ["name", "role", "status", "language", "enabled", "updated_at"], rows: data ?? [] });
+    }
+    if (section === "phone-numbers") {
+      const { data, error } = await database.from("phone_numbers").select("id,user_id,phone_number,provider,twilio_phone_number_sid,status,provisioning_status,is_default,assigned_at,created_at,profiles(display_name)").order("created_at", { ascending: false }).limit(100);
+      if (error) throw error;
+      return response.json({ section, columns: ["phone_number", "provider", "status", "provisioning_status", "is_default", "assigned_at"], rows: data ?? [] });
+    }
+    if (section === "billing") {
+      const [payments, plans] = await Promise.all([
+        database.from("payments").select("id,user_id,paypal_order_id,amount,currency,status,verification_status,product_type,created_at").order("created_at", { ascending: false }).limit(100),
+        database.from("plans").select("id,name,monthly_price,currency,minutes,active").order("monthly_price"),
+      ]);
+      if (payments.error || plans.error) throw payments.error ?? plans.error;
+      return response.json({ section, plans: plans.data ?? [], columns: ["amount", "currency", "status", "verification_status", "product_type", "created_at"], rows: payments.data ?? [] });
+    }
+    if (section === "usage") {
+      const { data, error } = await database.from("usage_ledger").select("id,user_id,call_id,usage_type,amount,unit,provider,description,created_at").order("created_at", { ascending: false }).limit(200);
+      if (error) throw error;
+      return response.json({ section, columns: ["usage_type", "amount", "unit", "provider", "description", "created_at"], rows: data ?? [] });
+    }
+    if (section === "audit-logs") {
+      const { data, error } = await database.from("audit_logs").select("id,admin_id,action,resource,resource_id,ip_address,user_agent,metadata,created_at").order("created_at", { ascending: false }).limit(200);
+      if (error) throw error;
+      return response.json({ section, columns: ["action", "resource", "resource_id", "created_at"], rows: data ?? [] });
+    }
+    if (section === "settings") {
+      const [telephony, profiles, billing] = await Promise.all([
+        database.from("phone_numbers").select("id", { count: "exact", head: true }).eq("status", "active"),
+        database.from("profiles").select("status", { count: "exact", head: true }),
+        database.from("billing_settings").select("*").eq("id", true).maybeSingle(),
+      ]);
+      if (telephony.error || profiles.error || billing.error) throw telephony.error ?? profiles.error ?? billing.error;
+      return response.json({ section, configuration: { provider: "twilio", activeNumbers: telephony.count ?? 0, users: profiles.count ?? 0, billing: billing.data ?? null, publicUrlConfigured: Boolean(config.PUBLIC_URL), speechEngineConfigured: Boolean(config.ELEVENLABS_SPEECH_ENGINE_ID), geminiConfigured: Boolean(config.GEMINI_API_KEY), paypalConfigured: Boolean(config.PAYPAL_CLIENT_ID && config.PAYPAL_CLIENT_SECRET) } });
+    }
+    return response.status(404).json({ error: "Admin section not found" });
+  } catch (error) {
+    next(error);
+  }
+});
+
 adminRouter.get(
   "/support/unread-count",
   async (request: AdminRequest, response, next) => {
