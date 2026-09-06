@@ -1,10 +1,15 @@
 import "dotenv/config";
 import { z } from "zod";
 
+const optionalUrl = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().url().optional(),
+);
+
 const schema = z.object({
   PORT: z.coerce.number().default(4000),
   FRONTEND_ORIGIN: z.string().default("http://localhost:3000"),
-  PUBLIC_URL: z.string().url().optional(),
+  PUBLIC_URL: optionalUrl,
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
   ADMIN_EMAILS: z
@@ -23,7 +28,7 @@ const schema = z.object({
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().min(1).optional(),
-  PUBLIC_WS_URL: z.string().url().optional(),
+  PUBLIC_WS_URL: optionalUrl.transform((value) => value?.replace(/^http/, "ws")),
   VOICE_PROVIDER_API_KEY: z.string().min(1).optional(),
   ELEVENLABS_SPEECH_ENGINE_ID: z.string().min(1).optional(),
   ELEVENLABS_SHARED_SECRET: z.string().min(1).optional(),
