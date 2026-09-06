@@ -24,6 +24,8 @@ PSTN caller
 
 Backend-only variables are documented in `.env.example`: Twilio account credentials, `PUBLIC_URL`/`PUBLIC_WS_URL`, `VOICE_PROVIDER_API_KEY`, `ELEVENLABS_SPEECH_ENGINE_ID`, `ELEVENLABS_SHARED_SECRET`, and `GEMINI_API_KEY`. Never expose these through frontend environment variables.
 
+Configure the ElevenLabs Speech Engine resource separately with the public brain URL `/api/voice/speech-engine/ws`, request header `x-api-key` set to `ELEVENLABS_SHARED_SECRET`, input/output audio format `ulaw_8000`, and the low-latency `eleven_flash_v2` model. The backend does not update this control-plane resource during startup, so a provider API error cannot prevent Render from starting.
+
 Number provisioning is idempotent through `phone_number_provisioning_jobs`. Twilio SIDs are stored in `phone_numbers.twilio_phone_number_sid`; the authenticated user's active default number is always used as outbound caller ID.
 
 ## Scheduled tasks

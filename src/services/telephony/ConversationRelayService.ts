@@ -87,17 +87,11 @@ export async function attachSpeechEngine(server: import("http").Server) {
     return;
   }
   const elevenlabs = new ElevenLabsClient({ apiKey: config.VOICE_PROVIDER_API_KEY });
-  const publicWebSocketUrl = config.PUBLIC_WS_URL ?? config.PUBLIC_URL?.replace(/^http/, "ws");
-  if (publicWebSocketUrl) {
-    await elevenlabs.speechEngine.update(config.ELEVENLABS_SPEECH_ENGINE_ID, {
-      asr: { userInputAudioFormat: "ulaw_8000" },
-      tts: { modelId: "eleven_flash_v2", agentOutputAudioFormat: "ulaw_8000" },
-      speechEngine: {
-        wsUrl: `${publicWebSocketUrl.replace(/\/$/, "")}/api/voice/speech-engine/ws`,
-        requestHeaders: { "x-api-key": config.ELEVENLABS_SHARED_SECRET },
-      },
-    });
-  }
+  console.info(JSON.stringify({
+    service: "speech-engine",
+    status: "starting",
+    websocketPath: "/api/voice/speech-engine/ws",
+  }));
   server.on("upgrade", (request, socket) => {
     if (request.url !== "/api/voice/speech-engine/ws") return;
     if (request.headers["x-api-key"] !== config.ELEVENLABS_SHARED_SECRET) {
