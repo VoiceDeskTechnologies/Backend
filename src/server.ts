@@ -17,6 +17,7 @@ import { adminRouter } from "./routes/admin.js";
 import { numbersRouter } from "./routes/numbers.js";
 import { knowledgeRouter } from "./routes/knowledge.js";
 import { supportRouter } from "./routes/support.js";
+import { updatesRouter, adminUpdatesRouter } from "./routes/updates.js";
 import { getSupabaseAdmin } from "./services/supabase.js";
 import { TwilioProvider } from "./services/telephony/TwilioProvider.js";
 import { attachConversationRelay, attachSpeechEngine } from "./services/telephony/ConversationRelayService.js";
@@ -142,6 +143,8 @@ app.use("/api/numbers", requireAuth, numbersRouter);
 app.use("/api/knowledge", requireAuth, knowledgeRouter);
 app.use("/api/support", requireAuth, supportRouter);
 app.use("/api/admin", requireAuth, requireAdmin, adminRouter);
+app.use("/api/admin/updates", requireAuth, requireAdmin, adminUpdatesRouter);
+app.use("/api/updates", updatesRouter);
 app.use("/api", billingRouter);
 
 app.use((error: Error, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
