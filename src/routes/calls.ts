@@ -2,10 +2,11 @@ import { Router } from "express";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { getSupabaseAdmin } from "../services/supabase.js";
 import { getEntitlement } from "../services/billing/EntitlementService.js";
-import { TelnyxTelephonyService, TelnyxTelephonyError } from "../services/telephony/TelephonyService.js";
+import { TwilioProvider, TwilioProviderError } from "../services/telephony/TwilioProvider.js";
 import { config } from "../config.js";
 import { z } from "zod";
 import { isAdministrator } from "../middleware/admin.js";
+import { reserveCallMinutes, reconcileCallMinutes } from "../services/billing/UsageService.js";
 
 export const callsRouter = Router();
 const startCallInput = z.object({
@@ -14,6 +15,8 @@ const startCallInput = z.object({
     .trim()
     .regex(/^\+[1-9]\d{6,14}$/, "Destination must be an E.164 phone number"),
   agentId: z.string().uuid().nullable().default(null),
+  taskId: z.string().uuid().nullable().default(null),
+  objective: z.string().trim().max(2000).nullable().default(null),
 });
 callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
   const parsed = startCallInput.safeParse(request.body);
@@ -46,10 +49,15 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
       return response
         .status(400)
         .json({ error: "That AI agent is not available" });
-    if (!config.PUBLIC_URL || !config.TELNYX_CONNECTION_ID)
+    const ownedTask = parsed.data.taskId
+      ? await database.from("call_tasks").select("id,objective,agent_id").eq("id", parsed.data.taskId).eq("user_id", request.userId).maybeSingle()
+      : { data: null, error: null };
+    if (ownedTask.error) throw ownedTask.error;
+    if (parsed.data.taskId && !ownedTask.data) return response.status(400).json({ error: "That call task is not available" });
+    if (!config.PUBLIC_URL || !config.TWILIO_ACCOUNT_SID || !config.TWILIO_AUTH_TOKEN)
       return response
         .status(503)
-        .json({ error: "Telnyx calling is not fully configured" });
+        .json({ error: "Twilio calling is not fully configured" });
     const assignedNumber = await database
       .from("phone_numbers")
       .select("id,phone_number")
@@ -65,32 +73,42 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
       return response.status(409).json({
         error: "No HANDSFREE number is currently assigned to your account.",
       });
+    const reservationMinutes = Math.max(1, Number(entitlement.plan?.plans.max_call_duration_minutes ?? 5));
     console.info(JSON.stringify({
       event: "outbound_call_started",
       userId: request.userId,
       phoneNumberId: assignedNumber.data.id,
-      provider: "telnyx",
+      provider: "twilio",
     }));
     const created = await database
       .from("calls")
       .insert({
         user_id: request.userId,
         agent_id: parsed.data.agentId,
+        task_id: parsed.data.taskId,
         phone_number_id: assignedNumber.data.id,
-        provider: "telnyx",
+        provider: "twilio",
         from_number: assignedNumber.data.phone_number,
         to_number: parsed.data.toNumber,
         direction: "outbound",
+        objective: parsed.data.objective ?? ownedTask.data?.objective ?? null,
         status: "queued",
       })
       .select()
       .single();
     if (created.error) throw created.error;
+    if (!administrator && !(await reserveCallMinutes(request.userId!, created.data.id, reservationMinutes))) {
+      await database.from("calls").update({ status: "failed", failure_reason: "INSUFFICIENT_MINUTES" }).eq("id", created.data.id);
+      return response.status(402).json({ error: "You do not have enough minutes for the maximum call duration." });
+    }
     try {
-      const result = await new TelnyxTelephonyService().startOutboundCall({
+      const result = await new TwilioProvider().startOutboundCall({
         to: parsed.data.toNumber,
         from: assignedNumber.data.phone_number,
-        callbackUrl: `${config.PUBLIC_URL}/api/webhooks/telnyx`,
+        answerUrl: `${config.PUBLIC_URL}/api/telephony/twilio/answer/${created.data.id}`,
+        statusCallbackUrl: `${config.PUBLIC_URL}/api/telephony/twilio/status`,
+        mediaStreamUrl: `${(config.PUBLIC_WS_URL ?? config.PUBLIC_URL.replace(/^http/, "ws"))}/api/telephony/twilio/media-stream`,
+        maxDurationSeconds: reservationMinutes * 60,
       });
       const updated = await database
         .from("calls")
@@ -104,6 +122,7 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
       if (updated.error) throw updated.error;
       response.status(201).json(updated.data);
     } catch (error) {
+      if (!administrator) await reconcileCallMinutes(created.data.id, 0).catch(() => undefined);
       await database
         .from("calls")
         .update({ status: "failed" })
@@ -112,11 +131,11 @@ callsRouter.post("/", async (request: AuthenticatedRequest, response, next) => {
         event: "outbound_call_failed",
         userId: request.userId,
         phoneNumberId: assignedNumber.data.id,
-        provider: "telnyx",
+        provider: "twilio",
         errorCode: error instanceof Error ? error.name : "UNKNOWN_ERROR",
         errorMessage: error instanceof Error ? error.message : "Unknown error",
       }));
-      if (error instanceof TelnyxTelephonyError && error.code === "TELNYX_DESTINATION_NOT_ALLOWED")
+      if (error instanceof TwilioProviderError)
         return response.status(403).json({
           error: error.message,
           code: error.code,

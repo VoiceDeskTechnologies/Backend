@@ -1,8 +1,11 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { createServer } from "node:http";
+import twilio from "twilio";
 import { config } from "./config.js";
 import { requireAuth } from "./middleware/auth.js";
+import { requireAdmin } from "./middleware/admin.js";
 import { agentsRouter } from "./routes/agents.js";
 import { contactsRouter } from "./routes/contacts.js";
 import { callsRouter } from "./routes/calls.js";
@@ -10,188 +13,116 @@ import { searchRouter } from "./routes/search.js";
 import { tasksRouter } from "./routes/tasks.js";
 import { settingsRouter } from "./routes/settings.js";
 import { billingRouter } from "./routes/billing.js";
-import { createServer } from "node:http";
-import { attachConversationRelay } from "./services/telephony/ConversationRelayService.js";
 import { adminRouter } from "./routes/admin.js";
-import { requireAdmin } from "./middleware/admin.js";
 import { numbersRouter } from "./routes/numbers.js";
 import { knowledgeRouter } from "./routes/knowledge.js";
 import { supportRouter } from "./routes/support.js";
-import {
-  mapTelnyxCallStatus,
-  type TelnyxCallEvent,
-  verifyTelnyxWebhook,
-} from "./services/telephony/TelnyxWebhookService.js";
 import { getSupabaseAdmin } from "./services/supabase.js";
-import { TelnyxTelephonyService } from "./services/telephony/TelephonyService.js";
-import { retryDueProvisioningJobs } from "./services/telephony/TelnyxNumberService.js";
-import { voiceRouter } from "./routes/voice.js";
+import { TwilioProvider } from "./services/telephony/TwilioProvider.js";
+import { attachConversationRelay, attachSpeechEngine } from "./services/telephony/ConversationRelayService.js";
+import { reconcileCallMinutes } from "./services/billing/UsageService.js";
+import { getEntitlement } from "./services/billing/EntitlementService.js";
+import { reserveCallMinutes } from "./services/billing/UsageService.js";
 
 const app = express();
 app.use(helmet());
 app.use(cors({ origin: config.FRONTEND_ORIGIN }));
-app.use(
-  express.json({
-    limit: "1mb",
-    verify: (request, _response, buffer) => {
-      (request as express.Request & { rawBody?: string }).rawBody =
-        buffer.toString("utf8");
-    },
-  }),
-);
-app.get("/health", (_request, response) =>
-  response.json({ status: "ok", service: "handsfree-api" }),
-);
-async function handleTelnyxWebhook(
-  request: express.Request,
-  response: express.Response,
-) {
-  const raw =
-    (request as express.Request & { rawBody?: string }).rawBody ??
-    JSON.stringify(request.body);
-  const valid = verifyTelnyxWebhook(
-    raw,
-    request.header("telnyx-signature-ed25519"),
-    request.header("telnyx-timestamp"),
-  );
-  if (!valid)
-    return response.status(401).json({ error: "Invalid Telnyx signature" });
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json({ limit: "1mb" }));
+
+function streamUrl() {
+  const base = config.PUBLIC_WS_URL ?? config.PUBLIC_URL?.replace(/^http/, "ws");
+  if (!base) throw new Error("PUBLIC_WS_URL or PUBLIC_URL is required for media streams");
+  return `${base.replace(/\/$/, "")}/api/telephony/twilio/media-stream`;
+}
+
+function twimlForStream(callId: string) {
+  const response = new twilio.twiml.VoiceResponse();
+  const stream = response.connect().stream({ url: streamUrl(), name: callId });
+  stream.parameter({ name: "callId", value: callId });
+  return response.toString();
+}
+
+function validTwilioWebhook(request: express.Request) {
+  return TwilioProvider.validateWebhook(request);
+}
+
+app.get("/health", (_request, response) => response.json({
+  database: config.SUPABASE_URL && config.SUPABASE_SERVICE_ROLE_KEY ? "configured" : "not configured",
+  twilio: config.TWILIO_ACCOUNT_SID && config.TWILIO_AUTH_TOKEN ? "configured" : "not configured",
+  speechEngine: config.ELEVENLABS_SPEECH_ENGINE_ID && config.ELEVENLABS_SHARED_SECRET ? "configured" : "not configured",
+  gemini: config.GEMINI_API_KEY ? "configured" : "not configured",
+  paypal: config.PAYPAL_CLIENT_ID && config.PAYPAL_CLIENT_SECRET ? "configured" : "not configured",
+}));
+
+app.post("/api/telephony/twilio/answer/:callId", async (request, response, next) => {
+  if (!validTwilioWebhook(request)) return response.status(401).send("Invalid Twilio signature");
   try {
-    const event = JSON.parse(raw) as TelnyxCallEvent;
-    const eventId = event.data?.id;
-    const eventType = event.data?.event_type;
-    const payload = event.data?.payload;
-    const providerCallId = payload?.call_control_id;
-    if (!eventId || !eventType || !payload)
-      return response.status(400).json({ error: "Malformed Telnyx event" });
-    const database = getSupabaseAdmin();
-    const recorded = await database
-      .from("call_provider_events")
-      .insert({
-        provider_event_id: eventId,
-        provider_call_id: providerCallId ?? null,
-        event_type: eventType,
-        payload: event,
-      });
-    if (recorded.error) {
-      if (recorded.error.code === "23505") return response.sendStatus(204);
-      throw recorded.error;
-    }
-    if (
-      eventType === "call.initiated" &&
-      payload.direction === "incoming" &&
-      providerCallId &&
-      payload.to
-    ) {
-      const assigned = await database
-        .from("phone_numbers")
-        .select("id,user_id,agent_id")
-        .eq("phone_number", payload.to)
-        .eq("status", "active")
-        .maybeSingle();
-      if (assigned.error) throw assigned.error;
-      if (assigned.data) {
-        const existing = await database
-          .from("calls")
-          .select("id")
-          .eq("provider_call_id", providerCallId)
-          .maybeSingle();
-        if (existing.error) throw existing.error;
-        if (!existing.data) {
-          const created = await database
-            .from("calls")
-            .insert({
-              user_id: assigned.data.user_id,
-              agent_id: assigned.data.agent_id,
-              phone_number_id: assigned.data.id,
-              provider: "telnyx",
-              provider_call_id: providerCallId,
-              from_number: payload.from ?? null,
-              to_number: payload.to,
-              direction: "inbound",
-              status: "queued",
-              created_at: payload.start_time ?? new Date().toISOString(),
-            })
-            .select("id")
-            .single();
-          if (created.error && created.error.code !== "23505")
-            throw created.error;
-        }
-        void new TelnyxTelephonyService()
-          .answerCall(providerCallId)
-          .then(() =>
-            new TelnyxTelephonyService().speak(
-              providerCallId,
-              "Welcome to HandsFree. Your connection is working.",
-            ),
-          )
-          .catch((error: Error) =>
-            console.error(
-              `Telnyx inbound call command failed: ${error.message}`,
-            ),
-          );
+    const updated = await getSupabaseAdmin().from("calls").update({ status: "connected", answered_at: new Date().toISOString() }).eq("id", request.params.callId);
+    if (updated.error) throw updated.error;
+    response.type("text/xml").send(twimlForStream(request.params.callId));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/telephony/twilio/status", async (request, response, next) => {
+  if (!validTwilioWebhook(request)) return response.status(401).send("Invalid Twilio signature");
+  try {
+    const statusMap: Record<string, string> = {
+      queued: "queued", ringing: "ringing", "in-progress": "connected", completed: "completed",
+      busy: "busy", failed: "failed", "no-answer": "no_answer", canceled: "cancelled",
+    };
+    const status = statusMap[String(request.body.CallStatus)];
+    if (status) {
+      const update: Record<string, unknown> = { status };
+      if (["completed", "busy", "failed", "no_answer", "cancelled"].includes(status)) {
+        update.ended_at = new Date().toISOString();
+        if (request.body.CallDuration) update.duration_seconds = Number(request.body.CallDuration);
       }
-    }
-    if (providerCallId) {
-      const status =
-        eventType === "call.hangup" &&
-        payload.hangup_cause?.toLowerCase().includes("cancel")
-          ? "cancelled"
-          : mapTelnyxCallStatus(eventType);
-      if (status) {
-        const endedAt = payload.end_time ?? new Date().toISOString();
-        const update = {
-          status,
-          ...(status === "connected"
-            ? {
-                started_at: payload.start_time ?? new Date().toISOString(),
-                answered_at: payload.answered_at ?? new Date().toISOString(),
-              }
-            : {}),
-          ...(status === "completed" ||
-          status === "cancelled" ||
-          status === "failed"
-            ? {
-                ended_at: endedAt,
-                failure_reason:
-                  status === "failed"
-                    ? (payload.failure_reason ?? payload.hangup_cause ?? null)
-                    : null,
-                ...(payload.start_time && payload.end_time
-                  ? {
-                      duration_seconds: Math.max(
-                        0,
-                        Math.round(
-                          (new Date(payload.end_time).getTime() -
-                            new Date(payload.start_time).getTime()) /
-                            1000,
-                        ),
-                      ),
-                    }
-                  : {}),
-              }
-            : {}),
-        };
-        const updated = await database
-          .from("calls")
-          .update(update)
-          .eq("provider_call_id", providerCallId);
-        if (updated.error) throw updated.error;
+      const updated = await getSupabaseAdmin().from("calls").update(update).eq("provider_call_id", request.body.CallSid);
+      if (updated.error) throw updated.error;
+      if (["completed", "busy", "failed", "no_answer", "cancelled"].includes(status)) {
+        const call = await getSupabaseAdmin().from("calls").select("id").eq("provider_call_id", request.body.CallSid).maybeSingle();
+        if (call.error) throw call.error;
+        if (call.data) await reconcileCallMinutes(call.data.id, Number(request.body.CallDuration ?? 0));
       }
     }
     response.sendStatus(204);
-  } catch (error) {
-    console.error(
-      `Telnyx webhook processing failed: ${error instanceof Error ? error.message : "unknown error"}`,
-    );
-    response.status(500).json({ error: "Webhook processing failed" });
-  }
-}
-app.post("/api/webhooks/telnyx", handleTelnyxWebhook);
-app.post("/telnyx/webhook", handleTelnyxWebhook);
-app.get("/api/me", requireAuth, (request, response) =>
-  response.json({ userId: (request as { userId?: string }).userId }),
-);
+  } catch (error) { next(error); }
+});
+
+app.post("/api/telephony/twilio/incoming", async (request, response, next) => {
+  if (!validTwilioWebhook(request)) return response.status(401).send("Invalid Twilio signature");
+  try {
+    const database = getSupabaseAdmin();
+    const assigned = await database.from("phone_numbers").select("id,user_id,agent_id").eq("phone_number", request.body.To).eq("status", "active").maybeSingle();
+    if (assigned.error) throw assigned.error;
+    if (!assigned.data) return response.status(404).send("Number not assigned");
+    let agentId = assigned.data.agent_id;
+    if (!agentId) {
+      const agent = await database.from("ai_agents").select("id").eq("user_id", assigned.data.user_id).eq("status", "active").order("created_at").limit(1).maybeSingle();
+      if (agent.error) throw agent.error;
+      agentId = agent.data?.id ?? null;
+    }
+    const created = await database.from("calls").insert({
+      user_id: assigned.data.user_id, agent_id: agentId, phone_number_id: assigned.data.id,
+      provider: "twilio", provider_call_id: request.body.CallSid, from_number: request.body.From,
+      to_number: request.body.To, direction: "inbound", status: "connected", answered_at: new Date().toISOString(),
+    }).select("id").single();
+    if (created.error) throw created.error;
+    const entitlement = await getEntitlement(assigned.data.user_id);
+    const reservationMinutes = Math.max(1, Number(entitlement.plan?.plans.max_call_duration_minutes ?? 5));
+    if (!(await reserveCallMinutes(assigned.data.user_id, created.data.id, reservationMinutes))) {
+      await database.from("calls").update({ status: "failed", failure_reason: "INSUFFICIENT_MINUTES" }).eq("id", created.data.id);
+      const rejected = new twilio.twiml.VoiceResponse();
+      rejected.say("This account does not have enough calling minutes available.");
+      rejected.hangup();
+      return response.type("text/xml").send(rejected.toString());
+    }
+    response.type("text/xml").send(twimlForStream(created.data.id));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/me", requireAuth, (request, response) => response.json({ userId: (request as { userId?: string }).userId }));
 app.use("/api/agents", requireAuth, agentsRouter);
 app.use("/api/contacts", requireAuth, contactsRouter);
 app.use("/api/calls", requireAuth, callsRouter);
@@ -201,35 +132,16 @@ app.use("/api/settings", requireAuth, settingsRouter);
 app.use("/api/numbers", requireAuth, numbersRouter);
 app.use("/api/knowledge", requireAuth, knowledgeRouter);
 app.use("/api/support", requireAuth, supportRouter);
-app.use("/api/voice", requireAuth, voiceRouter);
 app.use("/api/admin", requireAuth, requireAdmin, adminRouter);
 app.use("/api", billingRouter);
-app.use("/api", requireAuth, (_request, response) =>
-  response.status(501).json({ error: "This API capability is not configured" }),
-);
-app.use(
-  (
-    error: Error,
-    _request: express.Request,
-    response: express.Response,
-    _next: express.NextFunction,
-  ) => {
-    if (error instanceof SyntaxError && "body" in error)
-      return response.status(400).json({ error: "Malformed JSON payload" });
-    console.error(error.message);
-    if (/column .* does not exist|schema cache|relation .* does not exist/i.test(error.message))
-      return response.status(503).json({ error: "The backend database migrations are not fully applied. Apply the latest Supabase migrations and retry." });
-    response.status(500).json({ error: "Unexpected server error" });
-  },
-);
+
+app.use((error: Error, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  if (/column .* does not exist|schema cache|relation .* does not exist/i.test(error.message)) return response.status(503).json({ error: "The backend database migrations are not fully applied. Apply the latest Supabase migrations and retry." });
+  console.error(JSON.stringify({ service: "handsfree-api", error: error.message }));
+  response.status(500).json({ error: "Unexpected server error" });
+});
+
 const server = createServer(app);
-attachConversationRelay(server, config.GEMINI_API_KEY);
-server.listen(config.PORT, () =>
-  process.stdout.write(`HandsFree backend listening on ${config.PORT}\n`),
-);
-const provisioningRetryTimer = setInterval(() => {
-  void retryDueProvisioningJobs().catch((error: Error) =>
-    console.error(JSON.stringify({ event: "number_provisioning_retry_sweep_failed", errorCode: error.name })),
-  );
-}, 60_000);
-provisioningRetryTimer.unref();
+attachConversationRelay(server);
+void attachSpeechEngine(server).catch((error: Error) => console.error(JSON.stringify({ service: "speech-engine", status: "startup_failed", error: error.message })));
+server.listen(config.PORT, () => process.stdout.write(`HandsFree backend listening on ${config.PORT}\n`));

@@ -3,17 +3,16 @@ import { z } from "zod";
 import type { AdminRequest } from "../middleware/admin.js";
 import { getSupabaseAdmin } from "../services/supabase.js";
 import { config } from "../config.js";
-import { claimConfiguredNumberForUser, ensureNumberForUser, getNumber, listOwnedNumbers } from "../services/telephony/TelnyxNumberService.js";
+import { ensureNumberForUser, getNumber, listOwnedNumbers } from "../services/telephony/TwilioNumberService.js";
 
 export const adminRouter = Router();
 adminRouter.get("/telephony/config", (_request, response) =>
   response.json({
-    provider: "telnyx",
+    provider: "twilio",
     configured: {
-      apiKey: Boolean(config.TELNYX_API_KEY),
-      connectionId: Boolean(config.TELNYX_CONNECTION_ID),
-      phoneNumber: Boolean(config.TELNYX_PHONE_NUMBER),
-      publicKey: Boolean(config.TELNYX_PUBLIC_KEY),
+      accountSid: Boolean(config.TWILIO_ACCOUNT_SID),
+      authToken: Boolean(config.TWILIO_AUTH_TOKEN),
+      phoneNumber: Boolean(config.TWILIO_PHONE_NUMBER),
       publicUrl: Boolean(config.PUBLIC_URL),
     },
   }),
@@ -44,7 +43,7 @@ adminRouter.post("/phone-numbers/claim-configured", async (request: AdminRequest
   const parsed = z.object({ userId: z.string().uuid() }).safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: "A target user is required" });
   try {
-    const claimed = await claimConfiguredNumberForUser(parsed.data.userId);
+    const claimed = await ensureNumberForUser(parsed.data.userId, { idempotencyKey: `admin:${parsed.data.userId}` });
     if (claimed.created)
       await audit(request, "configured_phone_number_claimed", "user", parsed.data.userId, { phone_number_id: claimed.number?.id });
     response.status(claimed.created ? 201 : 200).json(claimed);
@@ -54,38 +53,35 @@ adminRouter.post("/phone-numbers/claim-configured", async (request: AdminRequest
 });
 
 adminRouter.post("/phone-numbers/import", async (request: AdminRequest, response, next) => {
-  const parsed = z.object({ telnyxPhoneNumberId: z.string().trim().min(1), userId: z.string().uuid() }).safeParse(request.body);
-  if (!parsed.success) return response.status(400).json({ error: "Telnyx number ID and target user are required" });
+  const parsed = z.object({ twilioPhoneNumberSid: z.string().trim().min(1), userId: z.string().uuid() }).safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: "Twilio phone number SID and target user are required" });
   try {
-    const number = await getNumber(parsed.data.telnyxPhoneNumberId);
-    if (!number.id || !number.phone_number) return response.status(404).json({ error: "Telnyx number not found" });
-    if (number.connection_id && number.connection_id !== config.TELNYX_CONNECTION_ID)
-      return response.status(400).json({ error: "That number is not attached to the configured Telnyx connection" });
+    const number = await getNumber(parsed.data.twilioPhoneNumberSid);
+    if (!number.sid || !number.phoneNumber) return response.status(404).json({ error: "Twilio number not found" });
     const database = getSupabaseAdmin();
-    const existing = await database.from("phone_numbers").select("id").eq("telnyx_phone_number_id", number.id).maybeSingle();
+    const existing = await database.from("phone_numbers").select("id").eq("twilio_phone_number_sid", number.sid).maybeSingle();
     if (existing.error) throw existing.error;
-    if (existing.data) return response.status(409).json({ error: "That Telnyx number is already imported" });
+    if (existing.data) return response.status(409).json({ error: "That Twilio number is already imported" });
     const { data, error } = await database.from("phone_numbers").insert({
       user_id: parsed.data.userId,
-      phone_number: number.phone_number,
-      provider: "telnyx",
-      provider_number_id: number.id,
-      telnyx_phone_number_id: number.id,
-      connection_id: number.connection_id ?? config.TELNYX_CONNECTION_ID,
-      country: number.country_code ?? config.TELNYX_DEFAULT_COUNTRY,
-      country_code: number.country_code ?? config.TELNYX_DEFAULT_COUNTRY,
-      area_code: number.phone_number.match(/^\+1(\d{3})/)?.[1] ?? null,
+      phone_number: number.phoneNumber,
+      provider: "twilio",
+      provider_number_id: number.sid,
+      twilio_phone_number_sid: number.sid,
+      country: "US",
+      country_code: "US",
+      area_code: number.phoneNumber.match(/^\+1(\d{3})/)?.[1] ?? null,
       status: "active",
       provisioning_status: "active",
       is_default: false,
       assigned_at: new Date().toISOString(),
-      capabilities: number.features ?? { voice: true },
+      capabilities: { voice: true },
     }).select().single();
     if (error) {
-      if (error.code === "23505") return response.status(409).json({ error: "That Telnyx number is already imported" });
+      if (error.code === "23505") return response.status(409).json({ error: "That Twilio number is already imported" });
       throw error;
     }
-    await audit(request, "phone_number_imported", "phone_number", data.id, { telnyx_number_id: number.id, user_id: parsed.data.userId });
+    await audit(request, "phone_number_imported", "phone_number", data.id, { twilio_number_sid: number.sid, user_id: parsed.data.userId });
     response.status(201).json(data);
   } catch (error) {
     next(error);
@@ -671,7 +667,7 @@ adminRouter.patch(
           "phone_number_provisioned",
           "user",
           request.params.id,
-          { provider: "telnyx", phone_number_id: provisioned.number.id },
+          { provider: "twilio", phone_number_id: provisioned.number.id },
         );
       response.json({
         ok: true,

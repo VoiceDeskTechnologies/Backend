@@ -1,5 +1,5 @@
 import { getSupabaseAdmin } from "../supabase.js";
-import { provisionNumberForUser } from "../telephony/TelnyxNumberService.js";
+import { provisionNumberForUser } from "../telephony/TwilioNumberService.js";
 
 export async function getOrCreateTrial(userId: string) {
   const database = getSupabaseAdmin();
