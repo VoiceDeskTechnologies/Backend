@@ -2,6 +2,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import { config } from "../../config.js";
 import { ConfiguredGeminiService } from "../ai/GeminiService.js";
+import { getSupabaseAdmin } from "../supabase.js";
 
 type TwilioMediaMessage = {
   event: "connected" | "start" | "media" | "dtmf" | "stop" | "mark";
@@ -13,7 +14,10 @@ type ElevenLabsEvent = {
   type?: string;
   audio_event?: { audio_base_64?: string };
   ping_event?: { event_id?: string };
+  conversation_initiation_metadata_event?: { conversation_id?: string };
 };
+
+const speechContexts = new Map<string, { callId: string }>();
 
 async function signedConversationUrl(elevenlabs: ElevenLabsClient) {
   if (!config.ELEVENLABS_SPEECH_ENGINE_ID) throw new Error("ELEVENLABS_SPEECH_ENGINE_ID is not configured");
@@ -42,7 +46,7 @@ function sendTwilioMedia(twilioWs: WebSocket, streamSid: string, payload: string
   twilioWs.send(twilioMediaEvent(streamSid, payload));
 }
 
-async function openElevenLabsConversation(twilioWs: WebSocket, elevenlabs: ElevenLabsClient, getStreamSid: () => string | undefined) {
+async function openElevenLabsConversation(twilioWs: WebSocket, elevenlabs: ElevenLabsClient, getStreamSid: () => string | undefined, callId: string) {
   const elevenLabsWs = new WebSocket(await signedConversationUrl(elevenlabs));
   await new Promise<void>((resolve, reject) => {
     const onOpen = () => { cleanup(); resolve(); };
@@ -57,7 +61,9 @@ async function openElevenLabsConversation(twilioWs: WebSocket, elevenlabs: Eleve
     try { event = JSON.parse(raw.toString()) as ElevenLabsEvent; } catch { return; }
     const streamSid = getStreamSid();
     if (!streamSid) return;
-    if (event.type === "audio" && event.audio_event?.audio_base_64) {
+    if (event.type === "conversation_initiation_metadata" && event.conversation_initiation_metadata_event?.conversation_id) {
+      speechContexts.set(event.conversation_initiation_metadata_event.conversation_id, { callId });
+    } else if (event.type === "audio" && event.audio_event?.audio_base_64) {
       sendTwilioMedia(twilioWs, streamSid, event.audio_event.audio_base_64);
     } else if (event.type === "interruption" && twilioWs.readyState === WebSocket.OPEN) {
       twilioWs.send(twilioClearEvent(streamSid));
@@ -66,6 +72,13 @@ async function openElevenLabsConversation(twilioWs: WebSocket, elevenlabs: Eleve
     }
   });
   return elevenLabsWs;
+}
+
+async function validateTwilioCall(callSid: string | undefined, callId: string | undefined) {
+  if (!callSid || !callId) return false;
+  const { data, error } = await getSupabaseAdmin().from("calls").select("id,provider_call_id,status").eq("id", callId).eq("provider_call_id", callSid).maybeSingle();
+  if (error) throw error;
+  return Boolean(data && !["completed", "failed", "cancelled", "busy", "no_answer"].includes(data.status));
 }
 
 export async function attachSpeechEngine(server: import("http").Server) {
@@ -93,11 +106,25 @@ export async function attachSpeechEngine(server: import("http").Server) {
     }
   });
   await elevenlabs.speechEngine.attach(config.ELEVENLABS_SPEECH_ENGINE_ID, server, "/api/voice/speech-engine/ws", {
+    onInit: (conversationId) => {
+      if (!speechContexts.has(conversationId)) console.warn(JSON.stringify({ service: "speech-engine", status: "call_context_missing", conversationId }));
+    },
     onTranscript: async (transcript, signal, session) => {
       const messages = transcript.map((message) => ({ role: message.role === "agent" ? "model" as const : "user" as const, content: message.content }));
-      const response = new ConfiguredGeminiService(config.GEMINI_API_KEY).respondStream(messages, "You are a concise, natural phone agent. Speak plainly, ask one question at a time, and never claim an action you did not complete.", signal);
+      const context = session.conversationId ? speechContexts.get(session.conversationId) : undefined;
+      let systemInstruction = "You are a concise, natural phone agent. Speak plainly, ask one question at a time, and never claim an action you did not complete.";
+      if (context) {
+        const call = await getSupabaseAdmin().from("calls").select("objective,ai_agents(name,personality,system_instructions,greeting,disclosure_enabled),call_tasks(objective,important_information,restrictions)").eq("id", context.callId).maybeSingle();
+        if (call.error) throw call.error;
+        const agent = Array.isArray(call.data?.ai_agents) ? call.data.ai_agents[0] : call.data?.ai_agents;
+        const task = Array.isArray(call.data?.call_tasks) ? call.data.call_tasks[0] : call.data?.call_tasks;
+        systemInstruction = [agent?.system_instructions, agent?.personality ? `Personality: ${agent.personality}` : "", agent?.disclosure_enabled ? "Clearly identify yourself as an AI assistant when introducing yourself." : "", call.data?.objective ? `Call objective: ${call.data.objective}` : "", task?.objective ? `Task objective: ${task.objective}` : "", task?.important_information ? `Important information: ${task.important_information}` : "", task?.restrictions ? `Restrictions: ${task.restrictions}` : "", "Speak plainly, ask one question at a time, and never claim an action you did not complete."].filter(Boolean).join("\n");
+      }
+      const response = new ConfiguredGeminiService(config.GEMINI_API_KEY).respondStream(messages, systemInstruction, signal);
       await session.sendResponse(response);
     },
+    onClose: (session) => { if (session.conversationId) speechContexts.delete(session.conversationId); },
+    onDisconnect: (session) => { if (session.conversationId) speechContexts.delete(session.conversationId); },
     onError: (error) => console.error(JSON.stringify({ service: "speech-engine", status: "error", error: String(error) })),
   });
 }
@@ -118,19 +145,26 @@ export function attachConversationRelay(server: import("http").Server) {
       elevenLabsWs = undefined;
     };
     twilioWs.on("message", (raw) => {
+      void handleTwilioMessage(raw).catch((error: Error) => {
+        console.error(JSON.stringify({ service: "twilio-media-stream", status: "message_failed", error: error.message }));
+        twilioWs.close(1011, "Media stream failed");
+      });
+    });
+    async function handleTwilioMessage(raw: RawData) {
       let event: TwilioMediaMessage;
       try { event = parse(raw); } catch { twilioWs.close(1003, "Invalid media stream message"); return; }
       if (event.event === "start") {
         streamSid = event.start?.streamSid;
-        if (!elevenlabs || !streamSid) { twilioWs.close(1011, "Speech Engine is not configured"); return; }
-        opening = openElevenLabsConversation(twilioWs, elevenlabs, () => streamSid).then((ws) => { elevenLabsWs = ws; return ws; }).catch((error: Error) => { console.error(JSON.stringify({ service: "speech-engine", status: "conversation_open_failed", error: error.message })); twilioWs.close(1011, "Speech Engine unavailable"); return undefined; });
+        const callId = event.start?.customParameters?.callId;
+        if (!elevenlabs || !streamSid || !(await validateTwilioCall(event.start?.callSid, callId))) { twilioWs.close(1008, "Unauthorized media stream"); return; }
+        opening = openElevenLabsConversation(twilioWs, elevenlabs, () => streamSid, callId!).then((ws) => { elevenLabsWs = ws; return ws; }).catch((error: Error) => { console.error(JSON.stringify({ service: "speech-engine", status: "conversation_open_failed", error: error.message })); twilioWs.close(1011, "Speech Engine unavailable"); return undefined; });
       } else if (event.event === "media" && event.media?.payload && opening) {
         void opening.then((ws) => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ user_audio_chunk: event.media?.payload })); });
       } else if (event.event === "stop") {
         closeElevenLabs();
         twilioWs.close();
       }
-    });
+    }
     twilioWs.on("close", closeElevenLabs);
     twilioWs.on("error", closeElevenLabs);
   });

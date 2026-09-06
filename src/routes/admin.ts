@@ -40,6 +40,7 @@ adminRouter.get("/phone-numbers/inventory", async (_request, response, next) => 
 });
 
 adminRouter.post("/phone-numbers/claim-configured", async (request: AdminRequest, response, next) => {
+  if (!requireSuperAdmin(request, response)) return;
   const parsed = z.object({ userId: z.string().uuid() }).safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: "A target user is required" });
   try {
@@ -53,6 +54,7 @@ adminRouter.post("/phone-numbers/claim-configured", async (request: AdminRequest
 });
 
 adminRouter.post("/phone-numbers/import", async (request: AdminRequest, response, next) => {
+  if (!requireSuperAdmin(request, response)) return;
   const parsed = z.object({ twilioPhoneNumberSid: z.string().trim().min(1), userId: z.string().uuid() }).safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: "Twilio phone number SID and target user are required" });
   try {
@@ -196,8 +198,10 @@ adminRouter.get("/users", async (request, response, next) => {
       })
       .order("created_at", { ascending: false })
       .range((page - 1) * pageSize, page * pageSize - 1);
-    if (search)
-      query = query.or(`display_name.ilike.%${search}%,id.eq.${search}`);
+    if (search) {
+      const safeSearch = search.replace(/[\\,()]/g, " ").replace(/[\r\n]/g, " ");
+      query = query.or(`display_name.ilike.%${safeSearch}%,id.eq.${safeSearch}`);
+    }
     const { data, count, error } = await query;
     if (error) throw error;
     response.json({ data: data ?? [], page, pageSize, total: count ?? 0 });
@@ -593,6 +597,7 @@ adminRouter.post(
 adminRouter.patch(
   "/users/:id/plan",
   async (request: AdminRequest, response, next) => {
+    if (!requireSuperAdmin(request, response)) return;
     const parsed = z
       .object({
         planId: z.string().uuid(),
@@ -684,6 +689,7 @@ adminRouter.patch(
 adminRouter.post(
   "/users/:id/credits",
   async (request: AdminRequest, response, next) => {
+    if (!requireSuperAdmin(request, response)) return;
     const parsed = z
       .object({
         amount: z.number().positive().max(100000),
@@ -743,6 +749,7 @@ adminRouter.post(
 adminRouter.patch(
   "/users/:id/status",
   async (request: AdminRequest, response, next) => {
+    if (!requireSuperAdmin(request, response)) return;
     const parsed = z
       .object({
         status: z.enum(["active", "suspended", "deleted"]),

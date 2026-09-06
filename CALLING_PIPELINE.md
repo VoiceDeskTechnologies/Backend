@@ -26,6 +26,12 @@ Backend-only variables are documented in `.env.example`: Twilio account credenti
 
 Number provisioning is idempotent through `phone_number_provisioning_jobs`. Twilio SIDs are stored in `phone_numbers.twilio_phone_number_sid`; the authenticated user's active default number is always used as outbound caller ID.
 
+## Scheduled tasks
+
+Scheduled tasks are executed by the backend worker in `src/services/tasks/TaskScheduler.ts`. The worker runs on a 15-second interval, atomically claims due tasks, validates the account, agent, destination, assigned number, and minutes, then creates the real Twilio call. The browser does not participate after task creation. Failed provider attempts are retried up to `max_attempts` with backoff; terminal Twilio status callbacks update the task to `completed` or `failed`.
+
+Apply migrations `0015_scheduled_task_worker.sql` and `0016_schema_completeness.sql` before creating scheduled tasks in production. The final migration is safe to apply after the earlier migrations and repairs missing incremental columns/indexes without replacing existing data.
+
 ## Verification
 
 `npm run build` type-checks the backend and `npm test` runs the focused Twilio provider tests. A real end-to-end call still requires configured Twilio, ElevenLabs Speech Engine, Gemini, Supabase, public HTTPS/WSS endpoints, and a live test call. No local test claims to validate that external loop.

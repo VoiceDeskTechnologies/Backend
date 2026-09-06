@@ -23,6 +23,7 @@ import { attachConversationRelay, attachSpeechEngine } from "./services/telephon
 import { reconcileCallMinutes } from "./services/billing/UsageService.js";
 import { getEntitlement } from "./services/billing/EntitlementService.js";
 import { reserveCallMinutes } from "./services/billing/UsageService.js";
+import { processDueTasks } from "./services/tasks/TaskScheduler.js";
 
 const app = express();
 app.use(helmet());
@@ -81,9 +82,14 @@ app.post("/api/telephony/twilio/status", async (request, response, next) => {
       const updated = await getSupabaseAdmin().from("calls").update(update).eq("provider_call_id", request.body.CallSid);
       if (updated.error) throw updated.error;
       if (["completed", "busy", "failed", "no_answer", "cancelled"].includes(status)) {
-        const call = await getSupabaseAdmin().from("calls").select("id").eq("provider_call_id", request.body.CallSid).maybeSingle();
+        const call = await getSupabaseAdmin().from("calls").select("id,task_id").eq("provider_call_id", request.body.CallSid).maybeSingle();
         if (call.error) throw call.error;
-        if (call.data) await reconcileCallMinutes(call.data.id, Number(request.body.CallDuration ?? 0));
+        if (call.data) {
+          await reconcileCallMinutes(call.data.id, Number(request.body.CallDuration ?? 0));
+          if (call.data.task_id) {
+            await getSupabaseAdmin().from("call_tasks").update({ status: status === "completed" ? "completed" : "failed", completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", call.data.task_id);
+          }
+        }
       }
     }
     response.sendStatus(204);
@@ -97,6 +103,9 @@ app.post("/api/telephony/twilio/incoming", async (request, response, next) => {
     const assigned = await database.from("phone_numbers").select("id,user_id,agent_id").eq("phone_number", request.body.To).eq("status", "active").maybeSingle();
     if (assigned.error) throw assigned.error;
     if (!assigned.data) return response.status(404).send("Number not assigned");
+    const profile = await database.from("profiles").select("status").eq("id", assigned.data.user_id).single();
+    if (profile.error) throw profile.error;
+    if (profile.data.status !== "active") return response.status(403).send("Account is not active");
     let agentId = assigned.data.agent_id;
     if (!agentId) {
       const agent = await database.from("ai_agents").select("id").eq("user_id", assigned.data.user_id).eq("status", "active").order("created_at").limit(1).maybeSingle();
@@ -145,3 +154,8 @@ const server = createServer(app);
 attachConversationRelay(server);
 void attachSpeechEngine(server).catch((error: Error) => console.error(JSON.stringify({ service: "speech-engine", status: "startup_failed", error: error.message })));
 server.listen(config.PORT, () => process.stdout.write(`HandsFree backend listening on ${config.PORT}\n`));
+const taskWorkerTimer = setInterval(() => {
+  void processDueTasks().catch((error: Error) => console.error(JSON.stringify({ service: "task-worker", status: "failed", error: error.message })));
+}, 15_000);
+taskWorkerTimer.unref();
+void processDueTasks().catch((error: Error) => console.error(JSON.stringify({ service: "task-worker", status: "startup_failed", error: error.message })));

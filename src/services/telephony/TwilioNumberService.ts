@@ -54,11 +54,15 @@ export async function provisionNumberForUser(userId: string, options: { paymentI
   if (jobError) throw jobError;
   if (job.status === "active" || job.status === "provisioning") return { number: await activeNumberForUser(userId), created: false, status: job.status };
   if (job.attempt_count >= maxProvisioningAttempts) throw new Error("Number provisioning has reached its retry limit");
-  await database.from("phone_number_provisioning_jobs").update({ status: "provisioning", attempt_count: job.attempt_count + 1, error_message: null, updated_at: new Date().toISOString() }).eq("id", job.id);
+  const claimed = await database.from("phone_number_provisioning_jobs").update({ status: "provisioning", attempt_count: job.attempt_count + 1, error_message: null, updated_at: new Date().toISOString() }).eq("id", job.id).in("status", ["pending", "failed"]).select("id").maybeSingle();
+  if (claimed.error) throw claimed.error;
+  if (!claimed.data) return { number: await activeNumberForUser(userId), created: false, status: "provisioning" };
+  let purchasedSid: string | undefined;
   try {
     const candidate = (await searchAvailableNumbers({ areaCode: options.areaCode }))[0];
     if (!candidate?.phoneNumber) throw new Error("No Twilio numbers are currently available");
     const purchased = await provider().provisionNumber(candidate.phoneNumber, voiceUrl(), statusUrl());
+    purchasedSid = purchased.sid;
     const defaultNumber = !(await database.from("phone_numbers").select("id").eq("user_id", userId).eq("is_default", true).eq("provisioning_status", "active").limit(1).maybeSingle()).data;
     const inserted = await database.from("phone_numbers").insert({
       user_id: userId, phone_number: purchased.phoneNumber, provider: "twilio", provider_number_id: purchased.sid,
@@ -70,6 +74,7 @@ export async function provisionNumberForUser(userId: string, options: { paymentI
     await database.from("phone_number_provisioning_jobs").update({ status: "active", twilio_phone_number_sid: purchased.sid, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", job.id);
     return { number: inserted.data, created: true, status: "active" };
   } catch (error) {
+    if (purchasedSid) await provider().releaseNumber(purchasedSid).catch(() => undefined);
     await database.from("phone_number_provisioning_jobs").update({ status: "failed", error_message: error instanceof Error ? error.message : "Provisioning failed", next_attempt_at: new Date(Date.now() + 120000).toISOString(), updated_at: new Date().toISOString() }).eq("id", job.id);
     throw error;
   }
