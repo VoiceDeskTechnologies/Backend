@@ -28,6 +28,7 @@ const schema = z.object({
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().min(1).optional(),
+  DEMO_USER_ID: z.string().uuid().optional(),
   PUBLIC_WS_URL: optionalUrl.transform((value) => value?.replace(/^http/, "ws")),
   VOICE_PROVIDER_API_KEY: z.string().min(1).optional(),
   ELEVENLABS_SPEECH_ENGINE_ID: z.string().min(1).optional(),

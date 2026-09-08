@@ -18,6 +18,7 @@ import { numbersRouter } from "./routes/numbers.js";
 import { knowledgeRouter } from "./routes/knowledge.js";
 import { supportRouter } from "./routes/support.js";
 import { updatesRouter, adminUpdatesRouter } from "./routes/updates.js";
+import { demoRouter } from "./routes/demo.js";
 import { getSupabaseAdmin } from "./services/supabase.js";
 import { TwilioProvider } from "./services/telephony/TwilioProvider.js";
 import { attachConversationRelay, attachSpeechEngine } from "./services/telephony/ConversationRelayService.js";
@@ -25,6 +26,7 @@ import { reconcileCallMinutes } from "./services/billing/UsageService.js";
 import { getEntitlement } from "./services/billing/EntitlementService.js";
 import { reserveCallMinutes } from "./services/billing/UsageService.js";
 import { processDueTasks } from "./services/tasks/TaskScheduler.js";
+import { demoCallsRouter } from "./routes/demoCalls.js";
 
 const app = express();
 app.use(helmet());
@@ -56,6 +58,9 @@ app.get("/health", (_request, response) => response.json({
   gemini: config.GEMINI_API_KEY ? "configured" : "not configured",
   paypal: config.PAYPAL_CLIENT_ID && config.PAYPAL_CLIENT_SECRET ? "configured" : "not configured",
 }));
+
+app.use("/api/demo", demoRouter);
+app.use("/api/demo/calls", demoCallsRouter);
 
 app.post("/api/telephony/twilio/answer/:callId", async (request, response, next) => {
   if (!validTwilioWebhook(request)) return response.status(401).send("Invalid Twilio signature");

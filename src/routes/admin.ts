@@ -305,6 +305,34 @@ adminRouter.get("/plans", async (_request, response, next) => {
   }
 });
 
+adminRouter.get("/demo-requests", async (request, response, next) => {
+  try {
+    const status = String(request.query.status ?? "");
+    const agentType = String(request.query.agentType ?? "");
+    const search = String(request.query.search ?? "").trim();
+    let query = getSupabaseAdmin().from("demo_requests").select("*").order("created_at", { ascending: false }).limit(100);
+    if (status) query = query.eq("status", status);
+    if (agentType) query = query.eq("agent_type", agentType);
+    if (search) query = query.or(`full_name.ilike.%${search}%,business_name.ilike.%${search}%,email.ilike.%${search}%`);
+    const { data, error } = await query;
+    if (error) throw error;
+    response.json(data ?? []);
+  } catch (error) { next(error); }
+});
+
+adminRouter.patch("/demo-requests/:id", async (request: AdminRequest, response, next) => {
+  const parsed = z.object({ status: z.enum(["new", "contacted", "scheduled", "completed", "cancelled"]).optional(), notes: z.string().trim().max(4000).nullable().optional(), assignedAdminId: z.string().uuid().nullable().optional() }).safeParse(request.body);
+  if (!parsed.success || !Object.keys(parsed.data).length) return response.status(400).json({ error: "Invalid demo request update" });
+  try {
+    const input = parsed.data;
+    const update = { ...(input.status !== undefined ? { status: input.status } : {}), ...(input.notes !== undefined ? { notes: input.notes } : {}), ...(input.assignedAdminId !== undefined ? { assigned_admin_id: input.assignedAdminId } : {}), updated_at: new Date().toISOString() };
+    const { data, error } = await getSupabaseAdmin().from("demo_requests").update(update).eq("id", request.params.id).select().single();
+    if (error) throw error;
+    await audit(request, "demo_request_updated", "demo_request", request.params.id, { changes: Object.keys(update) });
+    response.json(data);
+  } catch (error) { next(error); }
+});
+
 adminRouter.get("/overview/:section", async (request, response, next) => {
   try {
     const database = getSupabaseAdmin();
@@ -315,7 +343,7 @@ adminRouter.get("/overview/:section", async (request, response, next) => {
       return response.json({ section, columns: ["status", "direction", "to_number", "duration_seconds", "provider", "created_at"], rows: data ?? [] });
     }
     if (section === "agents") {
-      const { data, error } = await database.from("ai_agents").select("id,user_id,name,role,status,language,enabled,created_at,updated_at").order("updated_at", { ascending: false }).limit(100);
+      const { data, error } = await database.from("ai_agents").select("id,user_id,name,agent_type,objective,role,status,language,enabled,created_at,updated_at").order("updated_at", { ascending: false }).limit(100);
       if (error) throw error;
       return response.json({ section, columns: ["name", "role", "status", "language", "enabled", "updated_at"], rows: data ?? [] });
     }

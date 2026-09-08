@@ -46,6 +46,19 @@ export class TwilioProvider implements TelephonyService {
     }
   }
 
+  async endOutboundCall(providerCallId: string) {
+    try {
+      await this.client.calls(providerCallId).update({ status: "completed" });
+    } catch (error) {
+      const providerError = error as { status?: number; message?: string };
+      throw new TwilioProviderError(
+        "TWILIO_CALL_END_FAILED",
+        providerError.message ?? "Twilio could not end the call",
+        providerError.status,
+      );
+    }
+  }
+
   async searchNumbers(countryCode = "US", areaCode?: string) {
     if (!/^[A-Z]{2}$/.test(countryCode))
       throw new TwilioProviderError("TWILIO_DESTINATION_ERROR", "Country code must be ISO alpha-2");

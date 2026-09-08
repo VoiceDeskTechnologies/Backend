@@ -3,6 +3,7 @@ import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import { config } from "../../config.js";
 import { ConfiguredGeminiService } from "../ai/GeminiService.js";
 import { getSupabaseAdmin } from "../supabase.js";
+import { getAgentRoleConfig } from "../ai/AgentRoleConfig.js";
 
 type TwilioMediaMessage = {
   event: "connected" | "start" | "media" | "dtmf" | "stop" | "mark";
@@ -108,11 +109,12 @@ export async function attachSpeechEngine(server: import("http").Server) {
       const context = session.conversationId ? speechContexts.get(session.conversationId) : undefined;
       let systemInstruction = "You are a concise, natural phone agent. Speak plainly, ask one question at a time, and never claim an action you did not complete.";
       if (context) {
-        const call = await getSupabaseAdmin().from("calls").select("objective,ai_agents(name,personality,system_instructions,greeting,disclosure_enabled),call_tasks(objective,important_information,restrictions)").eq("id", context.callId).maybeSingle();
+        const call = await getSupabaseAdmin().from("calls").select("objective,ai_agents(name,agent_type,objective,personality,system_instructions,greeting,disclosure_enabled),call_tasks(objective,important_information,restrictions)").eq("id", context.callId).maybeSingle();
         if (call.error) throw call.error;
         const agent = Array.isArray(call.data?.ai_agents) ? call.data.ai_agents[0] : call.data?.ai_agents;
         const task = Array.isArray(call.data?.call_tasks) ? call.data.call_tasks[0] : call.data?.call_tasks;
-        systemInstruction = [agent?.system_instructions, agent?.personality ? `Personality: ${agent.personality}` : "", agent?.disclosure_enabled ? "Clearly identify yourself as an AI assistant when introducing yourself." : "", call.data?.objective ? `Call objective: ${call.data.objective}` : "", task?.objective ? `Task objective: ${task.objective}` : "", task?.important_information ? `Important information: ${task.important_information}` : "", task?.restrictions ? `Restrictions: ${task.restrictions}` : "", "Speak plainly, ask one question at a time, and never claim an action you did not complete."].filter(Boolean).join("\n");
+        const roleConfig = getAgentRoleConfig(agent?.agent_type);
+        systemInstruction = ["HANDSFREE platform rules: be truthful, protect privacy, follow the configured role, and never claim an action that did not happen.", `Role: ${roleConfig.name}`, `Role objective: ${roleConfig.objective}`, `Role behavior:\n- ${roleConfig.behavior.join("\n- ")}`, `Role prohibitions:\n- ${roleConfig.prohibited.join("\n- ")}`, agent?.objective ? `Agent objective: ${agent.objective}` : "", agent?.system_instructions, agent?.personality ? `Personality: ${agent.personality}` : "", agent?.disclosure_enabled ? "Clearly identify yourself as an AI assistant when introducing yourself." : "", call.data?.objective ? `Call objective: ${call.data.objective}` : "", task?.objective ? `Task objective: ${task.objective}` : "", task?.important_information ? `Important information: ${task.important_information}` : "", task?.restrictions ? `Restrictions: ${task.restrictions}` : "", "Speak plainly and ask one question at a time."].filter(Boolean).join("\n");
       }
       const response = new ConfiguredGeminiService(config.GEMINI_API_KEY).respondStream(messages, systemInstruction, signal);
       await session.sendResponse(response);
